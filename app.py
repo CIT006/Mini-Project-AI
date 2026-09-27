@@ -283,6 +283,7 @@ if "last_batch_elapsed" not in st.session_state:
 with st.sidebar:
     st.title("ThaiDocAI")
     st.caption("พื้นที่ทำงานเอกสารอัจฉริยะ")
+    st.info(f"🎨 ธีมที่เลือก: **{st.session_state.theme_mode}**\n\n*(เปลี่ยนธีมได้ที่ดรอปดาวน์ด้านบนขวา)*")
     selected_model_name = api_service.PRIMARY_MODEL_NAME
     selected_model_id = api_service.PRIMARY_MODEL_ID
     voice_gender = st.session_state.get("voice_selection", "หญิง (Female)")
@@ -374,6 +375,9 @@ with col_upload:
                 failed_results = [result for result in batch_results if not result.get("success")]
                 for failed in failed_results:
                     st.warning(f"{failed.get('file_name', 'เอกสาร')}: {failed.get('error', 'ประมวลผลไม่สำเร็จ')}")
+                    if failed.get("raw_content"):
+                        with st.expander(f"ดูคำตอบดิบจากโมเดล · {failed.get('file_name', '')}"):
+                            st.text(failed.get("raw_content"))
 
 with col_display:
     st.subheader("2 · ตรวจทานและจัดการผลลัพธ์")
@@ -412,6 +416,7 @@ with col_display:
                     d = r["data"]
                     doc_type = d.get("document_type") or ("สลิปโอนเงิน" if d.get("transfer_amount") is not None else "ใบเสร็จรับเงิน")
                     store = d.get("store_name") or "ไม่ระบุ"
+                    payer = d.get("payer_name") or ("-" if d.get("transfer_amount") is None else "ไม่ระบุ")
                     dt = d.get("date") or "ไม่ระบุ"
                     amt = d.get("transfer_amount") if d.get("transfer_amount") is not None else d.get("total")
                     amt_str = f"{float(amt):,.2f}" if amt is not None else "อ่านยอดไม่ได้"
@@ -421,7 +426,7 @@ with col_display:
                         "ชื่อไฟล์": fname,
                         "ประเภท": doc_type,
                         "ร้านค้า / ผู้รับ": store,
-                        "ผู้จ่ายเงิน/ผู้โอน": d.get("payer_name") or "-",  # ✅ เพิ่ม
+                        "ผู้จ่ายเงิน / ผู้โอน": payer,
                         "วันที่": dt,
                         "ยอดเงิน (บาท)": amt_str,
                         "สถานะ": v_str,
@@ -432,6 +437,7 @@ with col_display:
                         "ชื่อไฟล์": fname,
                         "ประเภท": "-",
                         "ร้านค้า / ผู้รับ": "-",
+                        "ผู้จ่ายเงิน / ผู้โอน": "-",
                         "วันที่": "-",
                         "ยอดเงิน (บาท)": "-",
                         "สถานะ": "❌ ล้มเหลว",
@@ -519,7 +525,7 @@ with col_display:
                 with st.form(f"review_document_{review_key}"):
                     identity_cols = st.columns([1.5, 1, 1])
                     reviewed_store = identity_cols[0].text_input(
-                        "ร้านค้า / ผู้รับเงิน",
+                        "ผู้รับเงิน (สลิป) / ร้านค้า (ใบเสร็จ)",
                         value=str(doc_data.get("store_name") or ""),
                     )
                     reviewed_date = identity_cols[1].text_input(
@@ -532,7 +538,13 @@ with col_display:
                     )
 
                     edited_items = None
+                    reviewed_payer = None
                     if is_transfer_doc:
+                        payer_cols = st.columns([1.5, 1.5])
+                        reviewed_payer = payer_cols[0].text_input(
+                            "ผู้จ่ายเงิน / ผู้โอน",
+                            value=str(doc_data.get("payer_name") or ""),
+                        )
                         amount_cols = st.columns(3)
                         reviewed_transfer = amount_cols[0].text_input(
                             "ยอดโอนถึงผู้รับ (บาท)",
@@ -544,23 +556,6 @@ with col_display:
                         reviewed_debit = amount_cols[2].text_input(
                             "ยอดหักบัญชีรวม (บาท)", value=str(doc_data.get("debited_total") or "")
                         )
-                        # ✅ แถวที่ 2: ข้อมูลผู้โอน (ใหม่)
-                        payer_cols = st.columns(3)
-                        reviewed_payer_name = payer_cols[0].text_input(
-                             "ชื่อผู้โอนเงิน", value=str(doc_data.get("payer_name") or "")
-                        )
-                        reviewed_payer_account = payer_cols[1].text_input(
-                            "เลขบัญชีผู้โอน", value=str(doc_data.get("payer_account") or "")
-                        )
-                        reviewed_receiver_account = payer_cols[2].text_input(
-                             "เลขบัญชีผู้รับ", value=str(doc_data.get("receiver_account") or "")
-                         )
-                          # ✅ แถวที่ 3: ธนาคาร (ใหม่)
-                        bank_cols = st.columns(1)
-                        reviewed_bank = bank_cols[0].text_input(
-                            "ธนาคาร", value=str(doc_data.get("bank_name") or "")
-                        )
-    
                     else:
                         amount_cols = st.columns(3)
                         reviewed_total = amount_cols[0].text_input(
@@ -581,14 +576,6 @@ with col_display:
                         )
                         reviewed_service = adjustment_cols[2].text_input(
                             "ค่าบริการ (บาท)", value=str(doc_data.get("service_charge") if doc_data.get("service_charge") is not None else "")
-                        )
-                         # ✅ เพิ่ม: ชื่อผู้ซื้อและแคชเชียร์
-                        extra_cols = st.columns(2)
-                        reviewed_payer_name = extra_cols[0].text_input(
-                            "ชื่อผู้ซื้อ/ลูกค้า (ถ้ามี)", value=str(doc_data.get("payer_name") or "")
-                        )
-                        reviewed_cashier = extra_cols[1].text_input(
-                            "แคชเชียร์/พนักงาน", value=str(doc_data.get("cashier") or "")
                         )
 
                         item_rows = [
@@ -631,11 +618,7 @@ with col_display:
                             reviewed_data["total"] = transfer_value
                             reviewed_data["fee"] = parse_optional_amount(reviewed_fee)
                             reviewed_data["debited_total"] = parse_optional_amount(reviewed_debit)
-                            # ✅ บันทึกข้อมูลผู้โอน
-                            reviewed_data["payer_name"] = reviewed_payer_name.strip() or None
-                            reviewed_data["payer_account"] = reviewed_payer_account.strip() or None
-                            reviewed_data["receiver_account"] = reviewed_receiver_account.strip() or None
-                            reviewed_data["bank_name"] = reviewed_bank.strip() or None
+                            reviewed_data["payer_name"] = (reviewed_payer or "").strip() or None
                         else:
                             for field, value in (
                                 ("total", reviewed_total),
@@ -648,9 +631,7 @@ with col_display:
                                 reviewed_data[field] = parse_optional_amount(value)
                             if reviewed_data["total"] is None:
                                 raise ValueError("กรุณาระบุยอดสุทธิที่อ่านจากภาพ")
-                            # ✅ บันทึกชื่อผู้ซื้อและแคชเชียร์
-                            reviewed_data["payer_name"] = reviewed_payer_name.strip() or None
-                            reviewed_data["cashier"] = reviewed_cashier.strip() or None = [
+                            reviewed_data["items"] = [
                                 {
                                     "name": str(row["name"]).strip(),
                                     "quantity": (
@@ -692,9 +673,10 @@ with col_display:
                 if transfer_amount is not None:
                     fee_value = doc_data.get("fee")
                     debit_value = doc_data.get("debited_total")
+                    payer_display = doc_data.get("payer_name") or "อ่านไม่ได้"
                     fee_display = f"{float(fee_value):,.2f} บาท" if fee_value is not None else "อ่านไม่ได้"
                     debit_display = f"{float(debit_value):,.2f} บาท" if debit_value is not None else "อ่านไม่ได้"
-                    st.caption(f"ค่าธรรมเนียม: {fee_display} | ยอดหักบัญชีรวม: {debit_display}")
+                    st.caption(f"ผู้จ่ายเงิน/ผู้โอน: {payer_display} | ค่าธรรมเนียม: {fee_display} | ยอดหักบัญชีรวม: {debit_display}")
 
                 review_audit = api_service.audit_financials(doc_data)
                 if review_audit["status"] == "passed":
@@ -775,27 +757,6 @@ with col_display:
                     st.caption("ต้องตั้งค่า AI For Thai API key เพื่อใช้เสียงอ่าน")
                 else:
                     st.caption("ยังไม่ได้สร้างเสียงอ่านผล")
-                    # ✅ แสดงข้อมูลผู้โอน/ผู้ซื้อ (ถ้ามี)
-                payer_name = doc_data.get("payer_name")
-                if payer_name:
-                    st.info(f"👤 ผู้จ่ายเงิน/ผู้ซื้อ: **{payer_name}**")
-                if is_transfer_doc:
-                    payer_account = doc_data.get("payer_account")
-                    receiver_account = doc_data.get("receiver_account")
-                    bank_name = doc_data.get("bank_name")
-                    if payer_account or receiver_account or bank_name:
-                        info_parts = []
-                        if payer_account:
-                            info_parts.append(f"บัญชีผู้โอน: {payer_account}")
-                        if receiver_account:
-                            info_parts.append(f"บัญชีผู้รับ: {receiver_account}")
-                        if bank_name:
-                            info_parts.append(f"ธนาคาร: {bank_name}")
-                        st.caption(" · ".join(info_parts))
-                else:
-                    cashier = doc_data.get("cashier")
-                    if cashier:
-                        st.caption(f"🧑💼 แคชเชียร์/พนักงาน: {cashier}")
 
         # ------------------ Tab 2: ตรวจสอบความถูกต้องทางการเงิน (Audit) ------------------
         with tab2:

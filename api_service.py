@@ -86,41 +86,37 @@ def is_ocr_meta_response(text):
 def summarize_document_data(data):
     transfer_amount = data.get("transfer_amount")
     if transfer_amount is not None:
-        summary = f"ยอดโอน {float(transfer_amount):,.2f} บาท"
+        payer = str(data.get("payer_name") or "").strip()
+        receiver = str(data.get("store_name") or "").strip()
+        if payer and receiver:
+            summary = f"โอนเงินจาก {payer} ถึง {receiver} "
+        elif receiver:
+            summary = f"โอนเงินถึง {receiver} "
+        elif payer:
+            summary = f"โอนเงินจาก {payer} "
+        else:
+            summary = ""
+        summary += f"ยอดโอน {float(transfer_amount):,.2f} บาท"
         fee = data.get("fee")
         debited_total = data.get("debited_total")
-        payer_name = data.get("payer_name")
-        receiver_account = data.get("receiver_account")
-        bank_name = data.get("bank_name")
-        if payer_name:
-            summary += f" โดย {payer_name}"
-        if receiver_account:
-            summary += f" ไปบัญชี {receiver_account}"
-        if bank_name:
-            summary += f" ({bank_name})"
         if fee is not None:
             summary += f" ค่าธรรมเนียม {float(fee):,.2f} บาท"
         if debited_total is not None:
             summary += f" ยอดหักบัญชีรวม {float(debited_total):,.2f} บาท"
         return summary
+
     total = data.get("total")
     if total is None:
         return "ไม่สามารถสกัดยอดเงินจากเอกสารได้ กรุณาตรวจข้อความ OCR และภาพต้นฉบับ"
-    payer_name = data.get("payer_name")
-    cashier = data.get("cashier")
-    extra = ""
-    if payer_name:
-        extra += f" ผู้ซื้อ: {payer_name}"
-    if cashier:
-        extra += f" แคชเชียร์: {cashier}"
-    return f"ยอดสุทธิที่ต้องชำระ {float(total):,.2f} บาท{extra}"
+    return f"ยอดสุทธิที่ต้องชำระ {float(total):,.2f} บาท"
 
 
-def optimize_image_for_ocr(image_bytes, max_dim=1200, quality=85):
+def optimize_image_for_ocr(image_bytes, max_dim=1500, quality=92):
     """
     Optimizes and downscales images in-memory to guarantee sub-3-second OCR processing.
-    Downscales large phone camera images (3-10MB) to optimal OCR resolution (~1200px),
-    greatly reducing network upload payload and Vision model inference latency.
+    Downscales large phone camera images (3-10MB) to a resolution that keeps small text
+    (e.g. names, item names) legible, while still greatly reducing network upload
+    payload and Vision model inference latency.
     """
     try:
         from PIL import Image, ImageOps
@@ -140,14 +136,77 @@ def optimize_image_for_ocr(image_bytes, max_dim=1200, quality=85):
         return image_bytes, "image/jpeg"
 
 
-def extract_document_intelligence(image_bytes, mime_type="image/jpeg"):
+def _extract_document_intelligence_once(optimized_mime, image_data, url, headers, output_schema, payload):
+    started = time.perf_counter()
+    try:
+        response = _http_session.post(url, headers=headers, json=payload, timeout=40)
+        elapsed = round(time.perf_counter() - started, 2)
+        if response.status_code != 200:
+            result = {"success": False, "error": f"Vision API HTTP {response.status_code}", "elapsed_time": elapsed}
+            # Auth/permission errors won't change on retry.
+            result["retryable"] = response.status_code not in (401, 403)
+            return result
+
+        answer = clean_llm_response(response.json()["choices"][0]["message"]["content"])
+        finish_reason = response.json()["choices"][0].get("finish_reason")
+        extracted = parse_json_object(answer)
+
+        # Some model responses skip the {"raw_ocr":..., "data": {...}} wrapper and
+        # return the receipt fields directly at the top level. Accept that shape too
+        # instead of treating it as a schema failure.
+        if isinstance(extracted, dict) and not isinstance(extracted.get("data"), dict):
+            data_field_names = set(output_schema["data"].keys())
+            if data_field_names & extracted.keys():
+                extracted = {"raw_ocr": extracted.get("raw_ocr", ""), "data": extracted}
+
+        if not extracted or not isinstance(extracted.get("data"), dict):
+            error_msg = "โมเดลอ่านภาพแล้ว แต่คืนข้อมูลไม่ครบตาม schema จึงไม่แสดงยอดที่คาดเดา"
+            if finish_reason == "length":
+                error_msg += " (คำตอบถูกตัดก่อนจบ ลองใหม่อีกครั้งหรือใช้ภาพที่มีรายการน้อยลง)"
+            return {
+                "success": False,
+                "error": error_msg,
+                "raw_content": answer,
+                "elapsed_time": elapsed,
+                "retryable": True,
+            }
+
+        raw_ocr = str(extracted.get("raw_ocr") or "").strip()
+        if is_ocr_meta_response(raw_ocr):
+            return {
+                "success": False,
+                "error": "Vision model ตอบคำอธิบายแทนข้อความ OCR จึงหยุดการคำนวณเพื่อป้องกันยอดเงินผิด",
+                "raw_content": raw_ocr,
+                "elapsed_time": elapsed,
+                "retryable": True,
+            }
+
+        data = extracted["data"]
+        data["items"] = data.get("items") or []
+        data["ocr_text"] = summarize_document_data(data)
+        return {
+            "success": True,
+            "data": data,
+            "raw_content": raw_ocr,
+            "elapsed_time": elapsed,
+        }
+    except Exception as error:
+        return {
+            "success": False,
+            "error": str(error),
+            "elapsed_time": round(time.perf_counter() - started, 2),
+            "retryable": True,
+        }
+
+
+def extract_document_intelligence(image_bytes, mime_type="image/jpeg", max_attempts=3):
     if not THAILLM_APIKEY:
         return {
             "success": False,
             "error": "ยังไม่ได้ตั้งค่า THAILLM_APIKEY กรุณาเพิ่มคีย์ใน .streamlit/secrets.toml หรือ environment variables แล้วเริ่มแอปใหม่",
         }
 
-    # Pre-process image to achieve sub-3-second response time
+    # Pre-process image once; reused across retry attempts below.
     optimized_bytes, optimized_mime = optimize_image_for_ocr(image_bytes)
     image_data = base64.b64encode(optimized_bytes).decode("utf-8")
     url = "https://api.thaillm.or.th/v1/chat/completions"
@@ -156,45 +215,43 @@ def extract_document_intelligence(image_bytes, mime_type="image/jpeg"):
         "Content-Type": "application/json",
     }
     output_schema = {
-    "raw_ocr": "ข้อความทุกบรรทัดที่มองเห็นจริง",
-    "data": {
-        "document_type": None,
-        "store_name": None,
-        "date": None,
-        "time": None,
-        "receipt_no": None,
-        "items": [{"name": None, "quantity": None, "unit_price": None, "line_total": None}],
-        "subtotal": None,
-        "discount": None,
-        "shipping": None,
-        "service_charge": None,
-        "vat": None,
-        "total": None,
-        "transfer_amount": None,
-        "fee": None,
-        "debited_total": None,
-        # ✅ ฟิลด์ใหม่: ข้อมูลผู้จ่ายเงิน/ผู้โอน
-        "payer_name": None,          # ชื่อผู้โอนเงิน / ผู้ซื้อ
-        "payer_account": None,       # เลขบัญชีผู้โอน (ถ้ามี)
-        "receiver_account": None,    # เลขบัญชีผู้รับ (ถ้ามี)
-        "bank_name": None,           # ธนาคาร (ถ้าระบุ)
-        "cashier": None,             # แคชเชียร์/พนักงาน (ใบเสร็จ)
-        "notes": None,
+        "raw_ocr": "ข้อความทุกบรรทัดที่มองเห็นจริง",
+        "data": {
+            "document_type": None,
+            "store_name": None,
+            "payer_name": None,
+            "date": None,
+            "time": None,
+            "receipt_no": None,
+            "items": [{"name": None, "quantity": None, "unit_price": None, "line_total": None}],
+            "subtotal": None,
+            "discount": None,
+            "shipping": None,
+            "service_charge": None,
+            "vat": None,
+            "total": None,
+            "transfer_amount": None,
+            "fee": None,
+            "debited_total": None,
+            "notes": None,
         },
     }
     prompt = (
-    "/no_think ตอบ JSON สั้นตาม schema นี้เท่านั้น: "
-    f"{json.dumps(output_schema, ensure_ascii=False)} "
-    "ถอดข้อความตรงตามภาพและห้ามเดาตัวเลข; ค่าที่อ่านไม่ได้ให้เป็น null. "
-    "ราคาต่อหน่วยคือ unit_price และ line_total คือยอดบรรทัดหลังคูณจำนวน. "
-    "subtotal คือยอดรายการก่อนส่วนลดและก่อนภาษี. "
-    "สำหรับสลิปโอนให้แยกยอดที่ผู้รับได้เป็น transfer_amount, ค่าธรรมเนียมเป็น fee, "
-    "ยอดหักบัญชีรวมเป็น debited_total; ห้ามรวม fee ใน transfer_amount. "
-    "total ของสลิปเท่ากับ transfer_amount. ถ้าไม่มีรายการให้ items เป็น []. "
-    # ✅ เพิ่มคำสั่งสกัดข้อมูลผู้โอน
-    "สำหรับสลิปโอน: ให้สกัด payer_name (ชื่อผู้โอน), payer_account (เลขบัญชีผู้โอน), "
-    "receiver_account (เลขบัญชีผู้รับ), bank_name (ธนาคาร) จากภาพให้ครบถ้วน. "
-    "สำหรับใบเสร็จ: ให้สกัด cashier (ชื่อ/รหัสพนักงานแคชเชียร์) และ payer_name (ชื่อลูกค้า/ผู้ซื้อ ถ้ามี)."
+        "/no_think ตอบ JSON สั้นตาม schema นี้เท่านั้น: "
+        f"{json.dumps(output_schema, ensure_ascii=False)} "
+        "ถอดข้อความตรงตามภาพและห้ามเดาตัวเลข; ค่าที่อ่านไม่ได้ให้เป็น null. "
+        "ราคาต่อหน่วยคือ unit_price และ line_total คือยอดบรรทัดหลังคูณจำนวน. "
+        "subtotal คือยอดรายการก่อนส่วนลดและก่อนภาษี. "
+        "สำหรับสลิปโอนให้แยกยอดที่ผู้รับได้เป็น transfer_amount, ค่าธรรมเนียมเป็น fee, "
+        "ยอดหักบัญชีรวมเป็น debited_total; ห้ามรวม fee ใน transfer_amount. "
+        "total ของสลิปเท่ากับ transfer_amount. ถ้าไม่มีรายการให้ items เป็น []. "
+        "สำหรับสลิปโอนเงิน: store_name คือชื่อผู้รับเงิน (ฝั่ง 'ไปยัง'/'ผู้รับ') "
+        "และ payer_name คือชื่อผู้โอน/ผู้จ่ายเงิน (ฝั่ง 'จาก'/'ผู้โอน') ห้ามใส่สลับกัน; "
+        "สำหรับใบเสร็จร้านค้าให้ payer_name เป็น null. "
+        "ชื่อบุคคล (store_name, payer_name) ให้ถอดตัวอักษรไทยทุกตัว รวมสระและวรรณยุกต์ ตามที่เห็นในภาพอย่างเคร่งครัดทีละตัวอักษร "
+        "ห้ามเดาหรือแก้ตัวสะกดให้เป็นชื่อที่คุ้นเคย/พบบ่อยกว่าเด็ดขาด แม้ตัวสะกดจะดูแปลกก็ให้คงไว้ตามภาพ. "
+        "อ่านวันที่ (date) ตามตัวเลขที่ปรากฏบนภาพอย่างละเอียดทีละหลัก ห้ามเดาหรือสับสนเลขที่รูปร่างคล้ายกัน "
+        "(เช่น 2 กับ 6, 0 กับ 8, 1 กับ 7) และคงรูปแบบ/ปี (พ.ศ. หรือ ค.ศ.) ตามที่เห็นในภาพ."
     )
     payload = {
         "model": "qwen3.5-9b",
@@ -212,47 +269,27 @@ def extract_document_intelligence(image_bytes, mime_type="image/jpeg"):
             },
         ],
         "chat_template_kwargs": {"enable_thinking": False},
-        "max_tokens": 800,
+        "max_tokens": 2000,
         "temperature": 0,
     }
 
-    started = time.perf_counter()
-    try:
-        response = _http_session.post(url, headers=headers, json=payload, timeout=40)
-        elapsed = round(time.perf_counter() - started, 2)
-        if response.status_code != 200:
-            return {"success": False, "error": f"Vision API HTTP {response.status_code}", "elapsed_time": elapsed}
-
-        answer = clean_llm_response(response.json()["choices"][0]["message"]["content"])
-        extracted = parse_json_object(answer)
-        if not extracted or not isinstance(extracted.get("data"), dict):
-            return {
-                "success": False,
-                "error": "โมเดลอ่านภาพแล้ว แต่คืนข้อมูลไม่ครบตาม schema จึงไม่แสดงยอดที่คาดเดา",
-                "raw_content": answer,
-                "elapsed_time": elapsed,
-            }
-
-        raw_ocr = str(extracted.get("raw_ocr") or "").strip()
-        if is_ocr_meta_response(raw_ocr):
-            return {
-                "success": False,
-                "error": "Vision model ตอบคำอธิบายแทนข้อความ OCR จึงหยุดการคำนวณเพื่อป้องกันยอดเงินผิด",
-                "raw_content": raw_ocr,
-                "elapsed_time": elapsed,
-            }
-
-        data = extracted["data"]
-        data["items"] = data.get("items") or []
-        data["ocr_text"] = summarize_document_data(data)
-        return {
-            "success": True,
-            "data": data,
-            "raw_content": raw_ocr,
-            "elapsed_time": elapsed,
-        }
-    except Exception as error:
-        return {"success": False, "error": str(error), "elapsed_time": round(time.perf_counter() - started, 2)}
+    # A schema mismatch, truncated response, or meta-commentary reply is often a
+    # one-off formatting slip from the vision model rather than a real failure, so
+    # retry automatically instead of making the user click "process" again.
+    last_result = None
+    for attempt in range(max_attempts):
+        result = _extract_document_intelligence_once(
+            optimized_mime, image_data, url, headers, output_schema, payload
+        )
+        if result.get("success"):
+            result.pop("retryable", None)
+            if attempt > 0:
+                result["attempts"] = attempt + 1
+            return result
+        last_result = result
+        if not result.pop("retryable", False):
+            break
+    return last_result
 
 
 def extract_documents_batch(documents, max_workers=5):
