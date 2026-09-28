@@ -272,5 +272,54 @@ class UnreliableNameTests(unittest.TestCase):
         self.assertEqual(result["data"]["store_name"], "นาย ก")
 
 
+class TyphoonNameTests(unittest.TestCase):
+    SLIP = "โอนเงินสำเร็จ\nจาก\nนาย ธันยบูรณ์ พ***\nกรุงไทย\nXXX-X-XX075-2\nไปยัง\nนาย ปรเมศ ไชยนาพันธุ์\nพร้อมเพย์\nจำนวนเงิน 30.00 บาท"
+
+    def test_names_follow_from_and_to_labels(self):
+        self.assertEqual(
+            api_service.names_from_ocr_text(self.SLIP),
+            {"payer_name": "นาย ธันยบูรณ์ พ***", "store_name": "นาย ปรเมศ ไชยนาพันธุ์"},
+        )
+
+    def test_same_line_and_markdown_labels(self):
+        text = "## จาก นาย ก ใจดี\n**ไปยัง**\n"
+        self.assertEqual(api_service.names_from_ocr_text(text), {"payer_name": "นาย ก ใจดี"})
+
+    def test_no_labels_returns_empty(self):
+        self.assertEqual(api_service.names_from_ocr_text("ใบเสร็จ 7-ELEVEN\nรวม 240.00"), {})
+        self.assertEqual(api_service.names_from_ocr_text(None), {})
+
+    def _resp(self, content):
+        from unittest.mock import MagicMock
+        r = MagicMock(); r.status_code = 200
+        r.json.return_value = {"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}
+        return r
+
+    def test_typhoon_names_override_qwen_and_skip_second_qwen_pass(self):
+        first = self._resp('{"raw_ocr": "x", "data": {"transfer_amount": 30, "total": 30, "store_name": "ผิด", "items": []}}')
+        typhoon = self._resp(self.SLIP)
+        with patch.object(api_service, "THAILLM_APIKEY", "k"), patch.object(
+            api_service, "TYPHOON_OCR_APIKEY", "t"
+        ), patch.object(api_service._http_session, "post", side_effect=[first, typhoon]) as post:
+            result = api_service.extract_document_intelligence(b"img")
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(result["data"]["store_name"], "นาย ปรเมศ ไชยนาพันธุ์")
+        self.assertEqual(result["data"]["name_source"], "typhoon-ocr")
+        self.assertIn("นาย ปรเมศ ไชยนาพันธุ์", result["data"]["ocr_text"])
+
+    def test_typhoon_without_labels_falls_back_to_qwen_pass(self):
+        first = self._resp('{"raw_ocr": "x", "data": {"transfer_amount": 30, "total": 30, "store_name": "เดิม", "items": []}}')
+        typhoon = self._resp("ข้อความไม่มีป้ายชื่อ")
+        refine = self._resp('{"receiver_name": "นาย ข"}')
+        with patch.object(api_service, "THAILLM_APIKEY", "k"), patch.object(
+            api_service, "TYPHOON_OCR_APIKEY", "t"
+        ), patch.object(api_service._http_session, "post", side_effect=[first, typhoon, refine]):
+            result = api_service.extract_document_intelligence(b"img")
+        self.assertEqual(result["data"]["store_name"], "นาย ข")
+
+    def test_no_typhoon_key_means_no_typhoon_call(self):
+        self.assertIsNone(api_service.typhoon_ocr_text(b"img")) if not api_service.TYPHOON_OCR_APIKEY else None
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -36,6 +36,8 @@ def _load_api_key(name):
 
 AIFORTHAI_APIKEY = _load_api_key("AIFORTHAI_APIKEY")
 THAILLM_APIKEY = _load_api_key("THAILLM_APIKEY")
+TYPHOON_OCR_APIKEY = _load_api_key("TYPHOON_OCR_API_KEY")
+TYPHOON_OCR_URL = "https://api.opentyphoon.ai/v1/chat/completions"
 
 AVAILABLE_MODELS = {
     "OpenThaiGPT 8B": "OpenThaiGPT-ThaiLLM-8B-Instruct-v7.2",
@@ -218,6 +220,76 @@ def unreliable_name_fields(data):
     return [label for key, label in NAME_FIELD_LABELS.items() if name_looks_unreliable(data.get(key))]
 
 
+def typhoon_ocr_text(image_bytes):
+    """Read the whole image with Typhoon OCR (a Thai-specialised OCR model).
+
+    Returns the Markdown text, or None if no key is set or the call fails.
+    Request shape follows the official typhoon-ocr client (OpenAI-compatible API).
+    """
+    if not TYPHOON_OCR_APIKEY:
+        return None
+    optimized_bytes, optimized_mime = optimize_image_for_ocr(image_bytes, max_dim=1800)
+    image_data = base64.b64encode(optimized_bytes).decode("utf-8")
+    prompt = (
+        "Extract all text from the image.\n\nInstructions:\n- Only return the clean Markdown.\n"
+        "- Do not include any explanation or extra text.\n- You must include all information on the page."
+    )
+    payload = {
+        "model": "typhoon-ocr",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:{optimized_mime};base64,{image_data}"}},
+                ],
+            }
+        ],
+        "max_tokens": 4096,
+        "temperature": 0.1,
+        "top_p": 0.6,
+        "repetition_penalty": 1.1,
+    }
+    headers = {"Authorization": f"Bearer {TYPHOON_OCR_APIKEY}", "Content-Type": "application/json"}
+    try:
+        response = _http_session.post(TYPHOON_OCR_URL, headers=headers, json=payload, timeout=60)
+        if response.status_code != 200:
+            return None
+        text = response.json()["choices"][0]["message"]["content"]
+        return text if isinstance(text, str) and text.strip() else None
+    except Exception:
+        return None
+
+
+def _clean_ocr_line(line):
+    line = re.sub(r"<[^>]+>", " ", line)  # drop HTML tags from table output
+    line = re.sub(r"^[\s#>|\-]+", "", line)  # markdown prefixes; '*' is kept (masked names)
+    return re.sub(r"[\s|]+$", "", line).strip()
+
+
+def names_from_ocr_text(text):
+    """Pick sender/receiver names from OCR text by their 'จาก' / 'ไปยัง' labels.
+
+    Copies the text verbatim (no LLM rewriting). Returns {"payer_name", "store_name"}
+    for whichever labels were found, or {} if the layout has no such labels.
+    """
+    lines = [_clean_ocr_line(line) for line in str(text or "").splitlines()]
+    lines = [line for line in lines if line]
+    found = {}
+    for label, key in (("จาก", "payer_name"), ("ไปยัง", "store_name")):
+        for index, line in enumerate(lines):
+            if line == label:
+                candidate = lines[index + 1] if index + 1 < len(lines) else ""
+            elif line.startswith(label + " "):
+                candidate = line[len(label):].strip()
+            else:
+                continue
+            if candidate and candidate not in ("จาก", "ไปยัง"):
+                found[key] = candidate
+                break
+    return found
+
+
 def _refine_person_names(optimized_mime, image_data, url, headers):
     """Second, narrow pass that reads only the sender/receiver names on a transfer slip.
 
@@ -351,6 +423,14 @@ def extract_document_intelligence(image_bytes, mime_type="image/jpeg", max_attem
             result.pop("retryable", None)
             if result["data"].get("transfer_amount") is not None:
                 data = result["data"]
+                typhoon_names = names_from_ocr_text(typhoon_ocr_text(image_bytes)) if TYPHOON_OCR_APIKEY else {}
+                if typhoon_names:
+                    data.update(typhoon_names)
+                    data["name_source"] = "typhoon-ocr"
+                    result["data"]["ocr_text"] = summarize_document_data(data)
+                    if attempt > 0:
+                        result["attempts"] = attempt + 1
+                    return result
                 for key, value in _refine_person_names(optimized_mime, image_data, url, headers).items():
                     # Don't replace a clean first-pass name with a Thai/Latin mix.
                     if name_looks_unreliable(value) and data.get(key) and not name_looks_unreliable(data.get(key)):

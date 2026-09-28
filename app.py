@@ -283,7 +283,6 @@ if "last_batch_elapsed" not in st.session_state:
 with st.sidebar:
     st.title("ThaiDocAI")
     st.caption("พื้นที่ทำงานเอกสารอัจฉริยะ")
-    st.info(f"🎨 ธีมที่เลือก: **{st.session_state.theme_mode}**\n\n*(เปลี่ยนธีมได้ที่ดรอปดาวน์ด้านบนขวา)*")
     selected_model_name = api_service.PRIMARY_MODEL_NAME
     selected_model_id = api_service.PRIMARY_MODEL_ID
     voice_gender = st.session_state.get("voice_selection", "หญิง (Female)")
