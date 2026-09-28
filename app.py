@@ -417,6 +417,10 @@ with col_display:
                     doc_type = d.get("document_type") or ("สลิปโอนเงิน" if d.get("transfer_amount") is not None else "ใบเสร็จรับเงิน")
                     store = d.get("store_name") or "ไม่ระบุ"
                     payer = d.get("payer_name") or ("-" if d.get("transfer_amount") is None else "ไม่ระบุ")
+                    if api_service.name_looks_unreliable(d.get("store_name")) and d.get("transfer_amount") is not None:
+                        store += " ⚠️"
+                    if api_service.name_looks_unreliable(d.get("payer_name")) and d.get("transfer_amount") is not None:
+                        payer += " ⚠️"
                     dt = d.get("date") or "ไม่ระบุ"
                     amt = d.get("transfer_amount") if d.get("transfer_amount") is not None else d.get("total")
                     amt_str = f"{float(amt):,.2f}" if amt is not None else "อ่านยอดไม่ได้"
@@ -677,6 +681,12 @@ with col_display:
                     fee_display = f"{float(fee_value):,.2f} บาท" if fee_value is not None else "อ่านไม่ได้"
                     debit_display = f"{float(debit_value):,.2f} บาท" if debit_value is not None else "อ่านไม่ได้"
                     st.caption(f"ผู้จ่ายเงิน/ผู้โอน: {payer_display} | ค่าธรรมเนียม: {fee_display} | ยอดหักบัญชีรวม: {debit_display}")
+                    suspect_names = api_service.unreliable_name_fields(doc_data)
+                    if suspect_names:
+                        st.warning(
+                            f"ชื่อ{' และ '.join(suspect_names)}มีอักษรอังกฤษปนกับไทย โมเดลอาจอ่านผิด "
+                            "กรุณาเทียบกับภาพและแก้ในฟอร์มตรวจทานก่อนยืนยัน"
+                        )
 
                 review_audit = api_service.audit_financials(doc_data)
                 if review_audit["status"] == "passed":

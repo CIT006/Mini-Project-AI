@@ -205,5 +205,72 @@ class ImageOptimizationTests(unittest.TestCase):
         self.assertEqual(mime, "image/jpeg")
 
 
+class NameRefinementTests(unittest.TestCase):
+    def _resp(self, content):
+        from unittest.mock import MagicMock
+        r = MagicMock()
+        r.status_code = 200
+        r.json.return_value = {"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}
+        return r
+
+    def test_second_pass_replaces_names_on_transfer_slip(self):
+        first = self._resp('{"raw_ocr": "x", "data": {"transfer_amount": 30, "total": 30, "store_name": "ผิด", "payer_name": "ผิด", "items": []}}')
+        second = self._resp('{"payer_name": "นาย ธันยบูรณ์ พ***", "receiver_name": "นาย ปรเมศ ไชยนาพันธุ์"}')
+        with patch.object(api_service, "THAILLM_APIKEY", "k"), patch.object(
+            api_service._http_session, "post", side_effect=[first, second]
+        ):
+            result = api_service.extract_document_intelligence(b"img")
+        self.assertEqual(result["data"]["store_name"], "นาย ปรเมศ ไชยนาพันธุ์")
+        self.assertEqual(result["data"]["payer_name"], "นาย ธันยบูรณ์ พ***")
+        self.assertIn("นาย ปรเมศ ไชยนาพันธุ์", result["data"]["ocr_text"])
+
+    def test_failed_second_pass_keeps_first_pass_names(self):
+        first = self._resp('{"raw_ocr": "x", "data": {"transfer_amount": 30, "total": 30, "store_name": "เดิม", "items": []}}')
+        with patch.object(api_service, "THAILLM_APIKEY", "k"), patch.object(
+            api_service._http_session, "post", side_effect=[first, RuntimeError("boom")]
+        ):
+            result = api_service.extract_document_intelligence(b"img")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["data"]["store_name"], "เดิม")
+
+    def test_receipts_skip_second_pass(self):
+        first = self._resp('{"raw_ocr": "x", "data": {"total": 10, "items": []}}')
+        with patch.object(api_service, "THAILLM_APIKEY", "k"), patch.object(
+            api_service._http_session, "post", side_effect=[first]
+        ) as post:
+            api_service.extract_document_intelligence(b"img")
+        self.assertEqual(post.call_count, 1)
+
+
+class UnreliableNameTests(unittest.TestCase):
+    def test_mixed_thai_and_latin_is_flagged(self):
+        self.assertTrue(api_service.name_looks_unreliable("สามนวล autherland"))
+        self.assertTrue(api_service.name_looks_unreliable("รันย์บุรณ์ P * * *"))
+
+    def test_clean_names_are_not_flagged(self):
+        self.assertFalse(api_service.name_looks_unreliable("นาย ธันยบูรณ์ พ***"))
+        self.assertFalse(api_service.name_looks_unreliable("7-ELEVEN"))
+        self.assertFalse(api_service.name_looks_unreliable(None))
+
+    def test_only_transfer_slips_report_fields(self):
+        slip = {"transfer_amount": 30, "store_name": "สามนวล autherland", "payer_name": "นาย ก"}
+        self.assertEqual(api_service.unreliable_name_fields(slip), ["ผู้รับเงิน"])
+        self.assertEqual(api_service.unreliable_name_fields({"store_name": "ร้าน ABC"}), [])
+
+    def test_mixed_second_pass_does_not_overwrite_clean_first_pass(self):
+        from unittest.mock import MagicMock
+        def resp(c):
+            r = MagicMock(); r.status_code = 200
+            r.json.return_value = {"choices": [{"message": {"content": c}, "finish_reason": "stop"}]}
+            return r
+        first = resp('{"raw_ocr": "x", "data": {"transfer_amount": 30, "total": 30, "store_name": "นาย ก", "items": []}}')
+        second = resp('{"receiver_name": "นาย autherland"}')
+        with patch.object(api_service, "THAILLM_APIKEY", "k"), patch.object(
+            api_service._http_session, "post", side_effect=[first, second]
+        ):
+            result = api_service.extract_document_intelligence(b"img")
+        self.assertEqual(result["data"]["store_name"], "นาย ก")
+
+
 if __name__ == "__main__":
     unittest.main()

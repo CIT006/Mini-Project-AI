@@ -199,6 +199,72 @@ def _extract_document_intelligence_once(optimized_mime, image_data, url, headers
         }
 
 
+_THAI_CHAR_RE = re.compile(r"[\u0E00-\u0E7F]")
+_LATIN_CHAR_RE = re.compile(r"[A-Za-z]")
+NAME_FIELD_LABELS = {"store_name": "ผู้รับเงิน", "payer_name": "ผู้จ่ายเงิน"}
+
+
+def name_looks_unreliable(name):
+    """A Thai name that also contains Latin letters (e.g. 'ไชยynaพิน') usually means the
+    vision model could not read the glyphs and guessed. '*' masking is not Latin."""
+    text = str(name or "")
+    return bool(_THAI_CHAR_RE.search(text) and _LATIN_CHAR_RE.search(text))
+
+
+def unreliable_name_fields(data):
+    """Labels of transfer-slip name fields that should be double-checked by the user."""
+    if not isinstance(data, dict) or data.get("transfer_amount") is None:
+        return []
+    return [label for key, label in NAME_FIELD_LABELS.items() if name_looks_unreliable(data.get(key))]
+
+
+def _refine_person_names(optimized_mime, image_data, url, headers):
+    """Second, narrow pass that reads only the sender/receiver names on a transfer slip.
+
+    A single-purpose prompt gives the vision model less to juggle than the full
+    18-field schema. Returns {"payer_name": str, "store_name": str} with only the
+    names that were read, or {} on any failure so the first-pass values are kept.
+    """
+    prompt = (
+        '/no_think อ่านเฉพาะชื่อบุคคลบนสลิปโอนเงินนี้ ตอบ JSON เท่านั้น: '
+        '{"payer_name": null, "receiver_name": null}. '
+        "payer_name คือชื่อใต้คำว่า 'จาก'; receiver_name คือชื่อใต้คำว่า 'ไปยัง'. "
+        "ถอดอักษรไทยตามภาพทีละตัวอักษร รวมคำนำหน้า (นาย/นาง/นางสาว) สระ วรรณยุกต์ และการันต์ (เช่น ธุ์) "
+        "ตัวที่ถูกปิดด้วย * ให้คง * ไว้ตามภาพ ห้ามแปลงอักษรไทยเป็นอักษรอังกฤษ ห้ามเดาหรือแก้ชื่อให้คุ้นเคย; อ่านไม่ได้ให้เป็น null."
+    )
+    payload = {
+        "model": "qwen3.5-9b",
+        "messages": [
+            {"role": "system", "content": "คุณเป็น OCR engine ตอบ JSON เดียวเท่านั้น ห้ามอธิบาย"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:{optimized_mime};base64,{image_data}"}},
+                ],
+            },
+        ],
+        "chat_template_kwargs": {"enable_thinking": False},
+        "max_tokens": 300,
+        "temperature": 0,
+    }
+    try:
+        response = _http_session.post(url, headers=headers, json=payload, timeout=40)
+        if response.status_code != 200:
+            return {}
+        answer = clean_llm_response(response.json()["choices"][0]["message"]["content"])
+        parsed = parse_json_object(answer) or {}
+    except Exception:
+        return {}
+
+    names = {}
+    for source_key, target_key in (("payer_name", "payer_name"), ("receiver_name", "store_name")):
+        value = parsed.get(source_key)
+        if isinstance(value, str) and value.strip() and value.strip().lower() != "null":
+            names[target_key] = value.strip()
+    return names
+
+
 def extract_document_intelligence(image_bytes, mime_type="image/jpeg", max_attempts=3):
     if not THAILLM_APIKEY:
         return {
@@ -283,6 +349,14 @@ def extract_document_intelligence(image_bytes, mime_type="image/jpeg", max_attem
         )
         if result.get("success"):
             result.pop("retryable", None)
+            if result["data"].get("transfer_amount") is not None:
+                data = result["data"]
+                for key, value in _refine_person_names(optimized_mime, image_data, url, headers).items():
+                    # Don't replace a clean first-pass name with a Thai/Latin mix.
+                    if name_looks_unreliable(value) and data.get(key) and not name_looks_unreliable(data.get(key)):
+                        continue
+                    data[key] = value
+                result["data"]["ocr_text"] = summarize_document_data(result["data"])
             if attempt > 0:
                 result["attempts"] = attempt + 1
             return result
