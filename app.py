@@ -3,10 +3,31 @@ import streamlit as st
 # pyrefly: ignore [missing-import]
 from PIL import Image
 import pandas as pd
+import datetime
+import io
 import json
 import html
 import time
 import api_service
+
+
+def build_batch_xlsx(rows):
+    """Real .xlsx (typed dates and numbers) so Excel doesn't reinterpret dates or show ####."""
+    buffer = io.BytesIO()
+    frame = pd.DataFrame(rows)
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        frame.to_excel(writer, index=False, sheet_name="สรุป")
+        sheet = writer.sheets["สรุป"]
+        for column_cells in sheet.columns:
+            longest = max(len(str(cell.value)) if cell.value is not None else 0 for cell in column_cells)
+            sheet.column_dimensions[column_cells[0].column_letter].width = min(max(longest + 3, 12), 60)
+            header = column_cells[0].value
+            for cell in column_cells[1:]:
+                if header == "วันที่" and isinstance(cell.value, datetime.date):
+                    cell.number_format = "yyyy-mm-dd"
+                elif header == "ยอดเงิน (บาท)" and isinstance(cell.value, (int, float)):
+                    cell.number_format = "#,##0.00"
+    return buffer.getvalue()
 
 
 def parse_optional_amount(value):
@@ -283,6 +304,7 @@ if "last_batch_elapsed" not in st.session_state:
 with st.sidebar:
     st.title("ThaiDocAI")
     st.caption("พื้นที่ทำงานเอกสารอัจฉริยะ")
+    st.info(f"🎨 ธีมที่เลือก: **{st.session_state.theme_mode}**\n\n*(เปลี่ยนธีมได้ที่ดรอปดาวน์ด้านบนขวา)*")
     selected_model_name = api_service.PRIMARY_MODEL_NAME
     selected_model_id = api_service.PRIMARY_MODEL_ID
     voice_gender = st.session_state.get("voice_selection", "หญิง (Female)")
@@ -409,6 +431,7 @@ with col_display:
 
             # Build batch overview table
             batch_table_data = []
+            export_rows = []  # same table with real numbers/dates for the .xlsx export
             for idx, r in enumerate(all_results):
                 fname = r.get("file_name", f"ภาพที่ {idx + 1}")
                 if r.get("success") and isinstance(r.get("data"), dict):
@@ -424,6 +447,8 @@ with col_display:
                     amt = d.get("transfer_amount") if d.get("transfer_amount") is not None else d.get("total")
                     amt_str = f"{float(amt):,.2f}" if amt is not None else "อ่านยอดไม่ได้"
                     v_str = "✅ ยืนยันแล้ว" if r.get("verified") else "⏳ รอตรวจทาน"
+                    name_source = d.get("name_source") or "-"
+                    notes = "; ".join(d.get("check_warnings") or []) or "-"
                     batch_table_data.append({
                         "ลำดับ": idx + 1,
                         "ชื่อไฟล์": fname,
@@ -432,6 +457,24 @@ with col_display:
                         "ผู้จ่ายเงิน / ผู้โอน": payer,
                         "วันที่": dt,
                         "ยอดเงิน (บาท)": amt_str,
+                        "แหล่งชื่อ": name_source,
+                        "ตรวจสอบ": notes,
+                        "สถานะ": v_str,
+                    })
+                    try:
+                        date_cell = datetime.date.fromisoformat(dt)
+                    except (TypeError, ValueError):
+                        date_cell = dt
+                    export_rows.append({
+                        "ลำดับ": idx + 1,
+                        "ชื่อไฟล์": fname,
+                        "ประเภท": doc_type,
+                        "ร้านค้า / ผู้รับ": store,
+                        "ผู้จ่ายเงิน / ผู้โอน": payer,
+                        "วันที่": date_cell,
+                        "ยอดเงิน (บาท)": float(amt) if amt is not None else None,
+                        "แหล่งชื่อ": name_source,
+                        "ตรวจสอบ": notes,
                         "สถานะ": v_str,
                     })
                 else:
@@ -443,26 +486,36 @@ with col_display:
                         "ผู้จ่ายเงิน / ผู้โอน": "-",
                         "วันที่": "-",
                         "ยอดเงิน (บาท)": "-",
+                        "แหล่งชื่อ": "-",
+                        "ตรวจสอบ": r.get("error") or "-",
                         "สถานะ": "❌ ล้มเหลว",
                     })
+                    export_rows.append(dict(batch_table_data[-1]))
 
             batch_df = pd.DataFrame(batch_table_data)
             st.dataframe(batch_df, width="stretch", hide_index=True)
 
             # Consolidated Export Buttons for Batch
             if successful_documents:
-                exp_col1, exp_col2 = st.columns(2)
+                exp_col1, exp_col2, exp_col3 = st.columns(3)
                 combined_csv_bytes = batch_df.to_csv(index=False).encode("utf-8-sig")
                 exp_col1.download_button(
-                    "📥 ดาวน์โหลดตารางสรุปทุกเอกสาร (CSV)",
+                    "📥 ตารางสรุป (CSV)",
                     data=combined_csv_bytes,
                     file_name="batch_documents_summary.csv",
                     mime="text/csv",
                     width="stretch",
                 )
+                exp_col3.download_button(
+                    "📥 ตารางสรุป (Excel)",
+                    data=build_batch_xlsx(export_rows),
+                    file_name="batch_documents_summary.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    width="stretch",
+                )
                 combined_json = [r.get("data") for r in all_results if r.get("success")]
                 exp_col2.download_button(
-                    "📥 ดาวน์โหลดข้อมูลรวมทุกเอกสาร (JSON)",
+                    "📥 ข้อมูลรวม (JSON)",
                     data=json.dumps(combined_json, ensure_ascii=False, indent=2).encode("utf-8"),
                     file_name="batch_documents_data.json",
                     mime="application/json",
@@ -612,6 +665,10 @@ with col_display:
                         reviewed_data = dict(doc_data)
                         reviewed_data["store_name"] = reviewed_store.strip() or "ไม่ระบุ"
                         reviewed_data["date"] = reviewed_date.strip() or "ไม่ระบุ"
+                        normalized_date = api_service.parse_date(reviewed_data["date"])
+                        if normalized_date:
+                            reviewed_data["date"] = normalized_date
+                        reviewed_data["check_warnings"] = []  # the user has now checked these against the image
                         reviewed_data["receipt_no"] = reviewed_reference.strip() or "ไม่ระบุ"
                         if is_transfer_doc:
                             transfer_value = parse_optional_amount(reviewed_transfer)
@@ -673,6 +730,8 @@ with col_display:
                 )
                 amount_label = "💸 ยอดโอน" if transfer_amount is not None else "💰 ยอดสุทธิ (Total)"
                 m3.metric(amount_label, total_display)
+                for check_warning in doc_data.get("check_warnings") or []:
+                    st.warning(check_warning)
                 if transfer_amount is not None:
                     fee_value = doc_data.get("fee")
                     debit_value = doc_data.get("debited_total")

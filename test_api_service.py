@@ -273,6 +273,11 @@ class UnreliableNameTests(unittest.TestCase):
 
 
 class TyphoonNameTests(unittest.TestCase):
+    def setUp(self):
+        p = patch.object(api_service, "TYPHOON_MIN_INTERVAL", 0)
+        p.start(); self.addCleanup(p.stop)
+        api_service._typhoon_calls.clear()
+
     SLIP = "โอนเงินสำเร็จ\nจาก\nนาย ธันยบูรณ์ พ***\nกรุงไทย\nXXX-X-XX075-2\nไปยัง\nนาย ปรเมศ ไชยนาพันธุ์\nพร้อมเพย์\nจำนวนเงิน 30.00 บาท"
 
     def test_names_follow_from_and_to_labels(self):
@@ -319,6 +324,120 @@ class TyphoonNameTests(unittest.TestCase):
 
     def test_no_typhoon_key_means_no_typhoon_call(self):
         self.assertIsNone(api_service.typhoon_ocr_text(b"img")) if not api_service.TYPHOON_OCR_APIKEY else None
+
+
+class DateNormalizationTests(unittest.TestCase):
+    def test_formats_seen_in_real_exports(self):
+        cases = {
+            "22 ก.ย. 2569": "2026-09-22",
+            "26 ก.ย. 2569 - 12:54": "2026-09-26",
+            "22/9/2569": "2026-09-22",
+            "25/9/2569": "2026-09-25",
+            "22/09/2026": "2026-09-22",
+            "22-ก.ย.-69": "2026-09-22",
+            "26 กันยายน 2569": "2026-09-26",
+            "2026-09-27": "2026-09-27",
+            "27/09/2026 14:30": "2026-09-27",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(api_service.parse_date(text), expected)
+
+    def test_bare_day_or_garbage_is_not_a_date(self):
+        for text in ("26", "", None, "ไม่ระบุ", "31/02/2569"):
+            with self.subTest(text=text):
+                self.assertIsNone(api_service.parse_date(text))
+
+    def test_normalize_keeps_raw_and_flags_partial_date(self):
+        ok = {"date": "22 ก.ย. 2569"}
+        api_service.normalize_document_date(ok)
+        self.assertEqual((ok["date"], ok["date_raw"], ok["check_warnings"]), ("2026-09-22", "22 ก.ย. 2569", []))
+        partial = {"date": "26"}
+        api_service.normalize_document_date(partial)
+        self.assertEqual(partial["date"], "26")
+        self.assertTrue(partial["check_warnings"])
+
+
+class CrossCheckTests(unittest.TestCase):
+    TEXT = "โอนเงินสำเร็จ\nจำนวนเงิน\n55.00 บาท\nค่าธรรมเนียม 0.00 บาท\nวันที่ทำรายการ 26 ก.ย. 2569 - 12:54"
+
+    def test_amount_and_date_read_from_ocr_text(self):
+        self.assertEqual(api_service._amount_from_ocr_text(self.TEXT), 55.0)
+        self.assertEqual(api_service._date_from_ocr_text(self.TEXT), "2026-09-26")
+
+    def test_fee_line_is_never_mistaken_for_amount(self):
+        self.assertIsNone(api_service._amount_from_ocr_text("จำนวนเงิน\nค่าธรรมเนียม 20.00 บาท"))
+
+    def test_amount_mismatch_warns_but_keeps_value(self):
+        data = {"transfer_amount": 50, "date": "2026-09-26"}
+        api_service.apply_ocr_crosscheck(data, self.TEXT)
+        self.assertEqual(data["transfer_amount"], 50)
+        self.assertTrue(any("ยอดโอนไม่ตรงกัน" in w for w in data["check_warnings"]))
+
+    def test_partial_date_is_completed_from_typhoon(self):
+        data = {"transfer_amount": 55, "date": "26"}
+        api_service.normalize_document_date(data)
+        api_service.apply_ocr_crosscheck(data, self.TEXT)
+        self.assertEqual(data["date"], "2026-09-26")
+        self.assertEqual(data["date_raw"], "26")
+        self.assertEqual(data["check_warnings"], [])
+
+    def test_conflicting_date_uses_typhoon_and_warns(self):
+        data = {"transfer_amount": 55, "date": "22 ก.ย. 2569"}
+        api_service.normalize_document_date(data)
+        api_service.apply_ocr_crosscheck(data, self.TEXT)
+        self.assertEqual(data["date"], "2026-09-26")
+        self.assertTrue(any("วันที่ไม่ตรงกัน" in w for w in data["check_warnings"]))
+
+    def test_matching_reads_add_no_warnings(self):
+        data = {"transfer_amount": 55, "date": "26 ก.ย. 2569"}
+        api_service.normalize_document_date(data)
+        api_service.apply_ocr_crosscheck(data, self.TEXT)
+        self.assertEqual(data["check_warnings"], [])
+
+
+class NameSourceAndLimiterTests(unittest.TestCase):
+    def setUp(self):
+        self._interval = patch.object(api_service, "TYPHOON_MIN_INTERVAL", 0)
+        self._interval.start()
+        self.addCleanup(self._interval.stop)
+        api_service._typhoon_calls.clear()
+
+    def _resp(self, content, status=200, headers=None):
+        from unittest.mock import MagicMock
+        r = MagicMock(); r.status_code = status; r.headers = headers or {}
+        r.json.return_value = {"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}
+        return r
+
+    def test_odd_characters_flag_name(self):
+        self.assertTrue(api_service.name_looks_unreliable("นาย ᵒᵒᵒ"))
+        self.assertFalse(api_service.name_looks_unreliable("นาย ธันยบูรณ์ พ***"))
+
+    def test_source_reports_why_typhoon_was_not_used(self):
+        first = self._resp('{"raw_ocr": "x", "data": {"transfer_amount": 30, "total": 30, "store_name": "เดิม", "items": []}}')
+        with patch.object(api_service, "THAILLM_APIKEY", "k"), patch.object(api_service, "TYPHOON_OCR_APIKEY", ""), patch.object(
+            api_service._http_session, "post", side_effect=[first, RuntimeError("x")]
+        ):
+            result = api_service.extract_document_intelligence(b"img")
+        self.assertIn("ไม่มีคีย์ Typhoon", result["data"]["name_source"])
+
+    def test_429_waits_and_retries(self):
+        ok = self._resp("จาก\nนาย ก\nไปยัง\nนาย ข")
+        limited = self._resp("", status=429, headers={"Retry-After": "1"})
+        with patch.object(api_service, "TYPHOON_OCR_APIKEY", "t"), patch.object(api_service.time, "sleep") as sleep, patch.object(
+            api_service._http_session, "post", side_effect=[limited, ok]
+        ) as post:
+            text, status = api_service._typhoon_ocr_request(b"img")
+        self.assertEqual((status, post.call_count), ("ok", 2))
+        self.assertIn("นาย ข", text)
+        sleep.assert_any_call(1.0)
+
+    def test_limiter_waits_when_window_is_full(self):
+        now = api_service.time.monotonic()
+        api_service._typhoon_calls.extend([now] * api_service.TYPHOON_MAX_PER_MINUTE)
+        with patch.object(api_service.time, "sleep", side_effect=lambda _: api_service._typhoon_calls.clear()) as sleep:
+            api_service._typhoon_wait_for_slot()
+        self.assertTrue(sleep.called)
 
 
 if __name__ == "__main__":

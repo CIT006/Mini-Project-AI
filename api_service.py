@@ -1,9 +1,12 @@
 import base64
+import datetime as _dt
 import io
 import json
 import os
 import re
+import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
@@ -206,11 +209,151 @@ _LATIN_CHAR_RE = re.compile(r"[A-Za-z]")
 NAME_FIELD_LABELS = {"store_name": "ผู้รับเงิน", "payer_name": "ผู้จ่ายเงิน"}
 
 
+_MONTH_ROWS = [
+    ("ม.ค.", "มกราคม", "jan"), ("ก.พ.", "กุมภาพันธ์", "feb"), ("มี.ค.", "มีนาคม", "mar"),
+    ("เม.ย.", "เมษายน", "apr"), ("พ.ค.", "พฤษภาคม", "may"), ("มิ.ย.", "มิถุนายน", "jun"),
+    ("ก.ค.", "กรกฎาคม", "jul"), ("ส.ค.", "สิงหาคม", "aug"), ("ก.ย.", "กันยายน", "sep"),
+    ("ต.ค.", "ตุลาคม", "oct"), ("พ.ย.", "พฤศจิกายน", "nov"), ("ธ.ค.", "ธันวาคม", "dec"),
+]
+_MONTH_LOOKUP = {}
+for _number, (_abbr, _full, _eng) in enumerate(_MONTH_ROWS, start=1):
+    for _key in (_abbr.replace(".", ""), _full, _eng):
+        _MONTH_LOOKUP[_key] = _number
+_TEXT_DATE_RE = re.compile(r"(\d{1,2})[\s/.\-]*([\u0E00-\u0E7F.]+|[A-Za-z]{3,9}\.?)[\s/.\-]*(\d{4}|\d{2})(?!\d)")
+_NUMERIC_DATE_RE = re.compile(r"(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{4}|\d{2})(?!\d)")
+_ISO_DATE_RE = re.compile(r"^\s*(\d{4})-(\d{2})-(\d{2})\b")
+
+
+def _resolve_year(year_text):
+    year = int(year_text)
+    if len(year_text) == 4:
+        return year - 543 if year > 2400 else year
+    # Two digits: could be Buddhist Era (25yy) or Gregorian (20yy). Pick the one nearest today.
+    today_year = _dt.date.today().year
+    return min((2000 + year, 1957 + year), key=lambda candidate: abs(candidate - today_year))
+
+
+def parse_date(text):
+    """Parse a Thai/English slip or receipt date into 'YYYY-MM-DD' (Gregorian), or None.
+
+    Understands BE/CE years, 2-digit years, Thai month names/abbreviations and
+    dd/mm/yyyy. A bare day number (e.g. '26') is NOT a complete date -> None.
+    """
+    text = str(text or "")
+    try:
+        iso = _ISO_DATE_RE.match(text)
+        if iso:
+            return _dt.date(int(iso.group(1)), int(iso.group(2)), int(iso.group(3))).isoformat()
+        for match in _NUMERIC_DATE_RE.finditer(text):
+            day, month, year_text = match.groups()
+            return _dt.date(_resolve_year(year_text), int(month), int(day)).isoformat()
+        for match in _TEXT_DATE_RE.finditer(text):
+            day, month_text, year_text = match.groups()
+            month = _MONTH_LOOKUP.get(month_text.replace(".", "").strip().lower())
+            if month:
+                return _dt.date(_resolve_year(year_text), month, int(day)).isoformat()
+    except ValueError:
+        return None
+    return None
+
+
+def normalize_document_date(data):
+    """Store the date as ISO (keeping the original text in date_raw); flag unreadable dates."""
+    warnings = data.setdefault("check_warnings", [])
+    raw = data.get("date")
+    if raw in (None, ""):
+        return
+    iso = parse_date(raw)
+    if iso:
+        data["date_raw"] = str(raw)
+        data["date"] = iso
+    else:
+        warnings.append(f"อ่านวันที่ได้ไม่ครบหรือรูปแบบไม่รู้จัก ('{raw}') กรุณาตรวจกับภาพ")
+
+
+def _ocr_lines(text):
+    lines = [_clean_ocr_line(line) for line in str(text or "").splitlines()]
+    return [line for line in lines if line]
+
+
+def _amount_from_ocr_text(text):
+    """Amount printed after the 'จำนวนเงิน' label on a slip, or None."""
+    lines = _ocr_lines(text)
+    for index, line in enumerate(lines):
+        if "จำนวนเงิน" not in line:
+            continue
+        for candidate in lines[index:index + 3]:
+            if "ค่าธรรมเนียม" in candidate:
+                break
+            match = re.search(r"\d[\d,]*\.\d{2}", candidate)
+            if match:
+                return float(match.group(0).replace(",", ""))
+    return None
+
+
+def _date_from_ocr_text(text):
+    lines = _ocr_lines(text)
+    for index, line in enumerate(lines):
+        if "วันที่" in line:
+            found = parse_date(" ".join(lines[index:index + 2]))
+            if found:
+                return found
+    return parse_date(" ".join(lines))
+
+
+def apply_ocr_crosscheck(data, text):
+    """Compare the vision model's amount/date with Typhoon OCR's reading of the same slip.
+
+    The amount is never overwritten (only flagged). A date that disagrees, or that the
+    vision model only read partially, is replaced by Typhoon's complete date, with a flag.
+    """
+    warnings = data.setdefault("check_warnings", [])
+    typhoon_amount = _amount_from_ocr_text(text)
+    vision_amount = data.get("transfer_amount")
+    if typhoon_amount is not None and vision_amount is not None:
+        try:
+            if abs(float(vision_amount) - typhoon_amount) >= 0.005:
+                warnings.append(
+                    f"ยอดโอนไม่ตรงกัน: โมเดลภาพอ่านได้ {float(vision_amount):,.2f} แต่ Typhoon OCR อ่านได้ "
+                    f"{typhoon_amount:,.2f} กรุณาตรวจกับภาพ"
+                )
+        except (TypeError, ValueError):
+            pass
+    typhoon_date = _date_from_ocr_text(text)
+    if typhoon_date:
+        current = parse_date(data.get("date"))
+        if current != typhoon_date:
+            if data.get("date") not in (None, ""):
+                if current:
+                    warnings.append(
+                        f"วันที่ไม่ตรงกัน: โมเดลภาพอ่านได้ {current} แต่ Typhoon OCR อ่านได้ {typhoon_date} "
+                        "(ใช้ค่าของ Typhoon) กรุณาตรวจกับภาพ"
+                    )
+                # a partial/unparseable date already produced its own warning; replace it
+                data["check_warnings"] = [w for w in warnings if not w.startswith("อ่านวันที่ได้ไม่ครบ")]
+                data.setdefault("date_raw", str(data.get("date")))
+            data["date"] = typhoon_date
+
+
+_ALLOWED_MASK_CHARS = set("•●○·＊")
+
+
+def _has_odd_characters(text):
+    """Characters that never belong in a Thai/ASCII name (e.g. 'ᵒ'), so likely OCR garbage."""
+    return any(
+        ord(char) > 127
+        and not (0x0E00 <= ord(char) <= 0x0E7F)
+        and not char.isspace()
+        and char not in _ALLOWED_MASK_CHARS
+        for char in str(text or "")
+    )
+
+
 def name_looks_unreliable(name):
     """A Thai name that also contains Latin letters (e.g. 'ไชยynaพิน') usually means the
     vision model could not read the glyphs and guessed. '*' masking is not Latin."""
     text = str(name or "")
-    return bool(_THAI_CHAR_RE.search(text) and _LATIN_CHAR_RE.search(text))
+    return bool((_THAI_CHAR_RE.search(text) and _LATIN_CHAR_RE.search(text)) or _has_odd_characters(text))
 
 
 def unreliable_name_fields(data):
@@ -220,14 +363,39 @@ def unreliable_name_fields(data):
     return [label for key, label in NAME_FIELD_LABELS.items() if name_looks_unreliable(data.get(key))]
 
 
-def typhoon_ocr_text(image_bytes):
-    """Read the whole image with Typhoon OCR (a Thai-specialised OCR model).
+# Typhoon OCR allows 2 requests/second and 20 requests/minute. Stay under both so a
+# large batch waits for a free slot instead of getting HTTP 429 and silently losing names.
+TYPHOON_MAX_PER_MINUTE = 18
+TYPHOON_MIN_INTERVAL = 0.5
+_typhoon_lock = threading.Lock()
+_typhoon_calls = deque()
 
-    Returns the Markdown text, or None if no key is set or the call fails.
+
+def _typhoon_wait_for_slot():
+    while True:
+        with _typhoon_lock:
+            now = time.monotonic()
+            while _typhoon_calls and now - _typhoon_calls[0] >= 60:
+                _typhoon_calls.popleft()
+            wait = 0.0
+            if len(_typhoon_calls) >= TYPHOON_MAX_PER_MINUTE:
+                wait = 60 - (now - _typhoon_calls[0])
+            elif _typhoon_calls and now - _typhoon_calls[-1] < TYPHOON_MIN_INTERVAL:
+                wait = TYPHOON_MIN_INTERVAL - (now - _typhoon_calls[-1])
+            if wait <= 0:
+                _typhoon_calls.append(now)
+                return
+        time.sleep(wait)
+
+
+def _typhoon_ocr_request(image_bytes):
+    """Read the whole image with Typhoon OCR (Thai-specialised). Returns (text, status).
+
+    status: 'ok', 'no_key', 'rate_limited', 'http_error' or 'error'.
     Request shape follows the official typhoon-ocr client (OpenAI-compatible API).
     """
     if not TYPHOON_OCR_APIKEY:
-        return None
+        return None, "no_key"
     optimized_bytes, optimized_mime = optimize_image_for_ocr(image_bytes, max_dim=1800)
     image_data = base64.b64encode(optimized_bytes).decode("utf-8")
     prompt = (
@@ -251,14 +419,41 @@ def typhoon_ocr_text(image_bytes):
         "repetition_penalty": 1.1,
     }
     headers = {"Authorization": f"Bearer {TYPHOON_OCR_APIKEY}", "Content-Type": "application/json"}
-    try:
-        response = _http_session.post(TYPHOON_OCR_URL, headers=headers, json=payload, timeout=60)
-        if response.status_code != 200:
-            return None
-        text = response.json()["choices"][0]["message"]["content"]
-        return text if isinstance(text, str) and text.strip() else None
-    except Exception:
-        return None
+    status = "error"
+    for attempt in range(3):
+        _typhoon_wait_for_slot()
+        try:
+            response = _http_session.post(TYPHOON_OCR_URL, headers=headers, json=payload, timeout=60)
+            if response.status_code == 429:
+                status = "rate_limited"
+                try:
+                    delay = min(float(response.headers.get("Retry-After", 5)), 30)
+                except (TypeError, ValueError):
+                    delay = 5
+                time.sleep(delay)
+                continue
+            if response.status_code != 200:
+                return None, "http_error"
+            text = response.json()["choices"][0]["message"]["content"]
+            if isinstance(text, str) and text.strip():
+                return text, "ok"
+            return None, "error"
+        except Exception:
+            return None, "error"
+    return None, status
+
+
+def typhoon_ocr_text(image_bytes):
+    """Typhoon OCR Markdown text for the image, or None when unavailable."""
+    return _typhoon_ocr_request(image_bytes)[0]
+
+
+_TYPHOON_STATUS_TEXT = {
+    "no_key": "ไม่มีคีย์ Typhoon",
+    "rate_limited": "Typhoon ติดโควตา",
+    "http_error": "Typhoon ตอบ error",
+    "error": "Typhoon เรียกไม่สำเร็จ",
+}
 
 
 def _clean_ocr_line(line):
@@ -421,22 +616,25 @@ def extract_document_intelligence(image_bytes, mime_type="image/jpeg", max_attem
         )
         if result.get("success"):
             result.pop("retryable", None)
-            if result["data"].get("transfer_amount") is not None:
-                data = result["data"]
-                typhoon_names = names_from_ocr_text(typhoon_ocr_text(image_bytes)) if TYPHOON_OCR_APIKEY else {}
+            data = result["data"]
+            normalize_document_date(data)
+            if data.get("transfer_amount") is not None:
+                typhoon_text, typhoon_status = _typhoon_ocr_request(image_bytes)
+                if typhoon_text:
+                    apply_ocr_crosscheck(data, typhoon_text)
+                typhoon_names = names_from_ocr_text(typhoon_text)
                 if typhoon_names:
                     data.update(typhoon_names)
                     data["name_source"] = "typhoon-ocr"
-                    result["data"]["ocr_text"] = summarize_document_data(data)
-                    if attempt > 0:
-                        result["attempts"] = attempt + 1
-                    return result
-                for key, value in _refine_person_names(optimized_mime, image_data, url, headers).items():
-                    # Don't replace a clean first-pass name with a Thai/Latin mix.
-                    if name_looks_unreliable(value) and data.get(key) and not name_looks_unreliable(data.get(key)):
-                        continue
-                    data[key] = value
-                result["data"]["ocr_text"] = summarize_document_data(result["data"])
+                else:
+                    reason = _TYPHOON_STATUS_TEXT.get(typhoon_status, "Typhoon ไม่พบป้าย จาก/ไปยัง")
+                    data["name_source"] = f"qwen ({reason})"
+                    for key, value in _refine_person_names(optimized_mime, image_data, url, headers).items():
+                        # Don't replace a clean first-pass name with a Thai/Latin mix.
+                        if name_looks_unreliable(value) and data.get(key) and not name_looks_unreliable(data.get(key)):
+                            continue
+                        data[key] = value
+                data["ocr_text"] = summarize_document_data(data)
             if attempt > 0:
                 result["attempts"] = attempt + 1
             return result
