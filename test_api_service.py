@@ -217,6 +217,8 @@ class NameRefinementTests(unittest.TestCase):
         first = self._resp('{"raw_ocr": "x", "data": {"transfer_amount": 30, "total": 30, "store_name": "ผิด", "payer_name": "ผิด", "items": []}}')
         second = self._resp('{"payer_name": "นาย ธันยบูรณ์ พ***", "receiver_name": "นาย ปรเมศ ไชยนาพันธุ์"}')
         with patch.object(api_service, "THAILLM_APIKEY", "k"), patch.object(
+            api_service, "TYPHOON_OCR_APIKEY", ""
+        ), patch.object(
             api_service._http_session, "post", side_effect=[first, second]
         ):
             result = api_service.extract_document_intelligence(b"img")
@@ -227,6 +229,8 @@ class NameRefinementTests(unittest.TestCase):
     def test_failed_second_pass_keeps_first_pass_names(self):
         first = self._resp('{"raw_ocr": "x", "data": {"transfer_amount": 30, "total": 30, "store_name": "เดิม", "items": []}}')
         with patch.object(api_service, "THAILLM_APIKEY", "k"), patch.object(
+            api_service, "TYPHOON_OCR_APIKEY", ""
+        ), patch.object(
             api_service._http_session, "post", side_effect=[first, RuntimeError("boom")]
         ):
             result = api_service.extract_document_intelligence(b"img")
@@ -438,6 +442,55 @@ class NameSourceAndLimiterTests(unittest.TestCase):
         with patch.object(api_service.time, "sleep", side_effect=lambda _: api_service._typhoon_calls.clear()) as sleep:
             api_service._typhoon_wait_for_slot()
         self.assertTrue(sleep.called)
+
+
+
+class BusinessIntelligenceAndQATests(unittest.TestCase):
+    def test_format_document_context_includes_items_and_financials(self):
+        doc = {
+            "store_name": "Amazon Cafe",
+            "date": "2026-09-27",
+            "receipt_no": "REC-99",
+            "total": 115.0,
+            "items": [
+                {"name": "Tea", "quantity": 1, "unit_price": 65.0, "line_total": 65.0},
+                {"name": "Croissant", "quantity": 1, "unit_price": 50.0, "line_total": 50.0}
+            ]
+        }
+        ctx = api_service.format_document_context_for_qa(doc, "RAW OCR TEXT")
+        self.assertIn("Amazon Cafe", ctx)
+        self.assertIn("Tea", ctx)
+        self.assertIn("65.00", ctx)
+        self.assertIn("115.00", ctx)
+        self.assertIn("RAW OCR TEXT", ctx)
+
+    def test_business_intelligence_categorizes_food_correctly(self):
+        doc = {
+            "store_name": "Starbucks Coffee",
+            "total": 175.0,
+            "items": [{"name": "Latte", "line_total": 175.0}]
+        }
+        bi = api_service.analyze_document_business_intelligence(doc)
+        self.assertIn("ค่าอาหารและเครื่องดื่ม", bi["expense_category"]["name"])
+        self.assertEqual(bi["expense_category"]["code"], "5101-01")
+
+    def test_business_intelligence_categorizes_fuel_correctly(self):
+        doc = {
+            "store_name": "PTT Station",
+            "total": 1200.0,
+            "items": [{"name": "Gasohol 95", "line_total": 1200.0}]
+        }
+        bi = api_service.analyze_document_business_intelligence(doc)
+        self.assertIn("ค่าเดินทางและยานพาหนะ", bi["expense_category"]["name"])
+        self.assertEqual(bi["expense_category"]["code"], "5102-01")
+
+    def test_batch_portfolio_detects_duplicates(self):
+        doc1 = {"success": True, "file_name": "doc1.jpg", "data": {"receipt_no": "REC-01", "total": 100.0, "store_name": "Shop A", "date": "2026-09-01"}}
+        doc2 = {"success": True, "file_name": "doc2.jpg", "data": {"receipt_no": "REC-01", "total": 100.0, "store_name": "Shop A", "date": "2026-09-01"}}
+        batch_res = api_service.analyze_batch_portfolio([doc1, doc2])
+        self.assertEqual(len(batch_res["duplicates"]), 2)  # both receipt_no and fingerprint
+        self.assertEqual(batch_res["total_spending"], 200.0)
+
 
 
 if __name__ == "__main__":

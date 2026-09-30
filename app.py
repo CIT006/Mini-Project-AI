@@ -95,6 +95,11 @@ st.markdown(f"""
     [data-testid="stToolbar"] {{
         color: {theme_colors['main_text']} !important;
     }}
+    /* Hide Deploy button completely */
+    .stDeployButton, [data-testid="stAppDeployButton"], header [data-testid="stToolbar"] .stDeployButton, [data-testid="manage-app-button"] {{
+        display: none !important;
+        visibility: hidden !important;
+    }}
     
     .stApp {{ background: {theme_colors['main_bg']} !important; color: {theme_colors['main_text']} !important; }}
     [data-testid="stSidebar"] > div:first-child {{ background: {theme_colors['sidebar_bg']} !important; }}
@@ -304,7 +309,6 @@ if "last_batch_elapsed" not in st.session_state:
 with st.sidebar:
     st.title("ThaiDocAI")
     st.caption("พื้นที่ทำงานเอกสารอัจฉริยะ")
-    st.info(f"🎨 ธีมที่เลือก: **{st.session_state.theme_mode}**\n\n*(เปลี่ยนธีมได้ที่ดรอปดาวน์ด้านบนขวา)*")
     selected_model_name = api_service.PRIMARY_MODEL_NAME
     selected_model_id = api_service.PRIMARY_MODEL_ID
     voice_gender = st.session_state.get("voice_selection", "หญิง (Female)")
@@ -552,10 +556,10 @@ with col_display:
         
         # แท็บแสดงผล 4 รูปแบบ
         tab1, tab2, tab3, tab4 = st.tabs([
-            "ตรวจเอกสารและส่งออก",
-            "ตรวจยอด",
-            "ถามเอกสาร",
-            "เครื่องมือเพิ่มเติม"
+            "📄 ตรวจเอกสารและส่งออก",
+            "🧠 วิเคราะห์ธุรกิจ & ภาษี AI",
+            "💬 ถาม-ตอบเอกสารอัจฉริยะ",
+            "⚙️ ตรวจสอบยอด & ตัวช่วยเสริม"
         ])
         
         # ------------------ Tab 1: ตารางและ Metric ------------------
@@ -810,25 +814,155 @@ with col_display:
                 st.markdown("##### 📝 ข้อความที่อ่านได้จากเอกสาร:")
                 st.info(raw_content)
                 
-            with st.expander("ตัวเลือกเสริม · ฟังเสียงอ่านผล"):
-                st.caption(f"เสียง: {voice_gender}")
-                if st.button("สร้างเสียงอ่านสรุป", disabled=not api_service.AIFORTHAI_APIKEY):
-                    tail = "ค่ะ" if voice_mode == "female" else "ครับ"
-                    store_txt = doc_data.get("store_name", "เอกสาร") if doc_data else "เอกสาร"
-                    financial_summary = api_service.summarize_document_data(doc_data or {})
-                    text_to_speak = f"เอกสารจาก {store_txt} {financial_summary}{tail}"
-                    st.session_state.tts_audio_url = api_service.call_vaja_tts(text_to_speak, mode=voice_mode)
-                    st.rerun()
-                if st.session_state.tts_audio_url:
-                    st.audio(st.session_state.tts_audio_url)
-                elif not api_service.AIFORTHAI_APIKEY:
-                    st.caption("ต้องตั้งค่า AI For Thai API key เพื่อใช้เสียงอ่าน")
-                else:
-                    st.caption("ยังไม่ได้สร้างเสียงอ่านผล")
-
-        # ------------------ Tab 2: ตรวจสอบความถูกต้องทางการเงิน (Audit) ------------------
+        # ------------------ Tab 2: วิเคราะห์ธุรกิจ & ภาษี AI (AI Business, Tax & Risk Analytics) ------------------
         with tab2:
-            st.markdown("#### ตรวจความสอดคล้องของยอด")
+            st.markdown("#### 🧠 วิเคราะห์ข้อมูลธุรกิจและภาษีอัจฉริยะ (AI Business & Tax Intelligence)")
+            st.caption("ระบบวิเคราะห์อัตโนมัติ: จัดผังบัญชี ตรวจสอบเกณฑ์ภาษีสรรพากร และตรวจจับความเสี่ยงทุจริตในบิล")
+            
+            bi_res = api_service.analyze_document_business_intelligence(doc_data, raw_content)
+            cat_info = bi_res["expense_category"]
+            tax_info = bi_res["tax_compliance"]
+            fraud_info = bi_res["fraud_anomaly"]
+            exec_info = bi_res["executive_insights"]
+
+            # Row 1: Category & Tax Compliance
+            c_cat, c_tax = st.columns(2)
+            with c_cat:
+                with st.container(border=True):
+                    st.markdown("##### 🏷️ จัดหมวดหมู่ค่าใช้จ่าย & ผังบัญชี (Account Code)")
+                    st.markdown(f"**หมวดหมู่:** `{cat_info['name']}`")
+                    st.markdown(f"**รหัสบัญชีแนะนำ:** <span style='font-size:1.2rem; font-weight:700; color:#D8A447;'>{cat_info['code']}</span>", unsafe_allow_html=True)
+                    st.caption(f"ระดับความมั่นใจ: {cat_info['confidence']} · {cat_info['reason']}")
+                    st.text_area(
+                        "ข้อความบันทึกสมุดรายวัน (Journal Entry Narration):",
+                        value=cat_info['narration'],
+                        height=68,
+                        help="สามารถคัดลอกข้อความนี้ไปลงสมุดรายวันทั่วไปในโปรแกรมบัญชีได้ทันที"
+                    )
+
+            with c_tax:
+                with st.container(border=True):
+                    st.markdown("##### 📋 การประเมินสิทธิ์ภาษี & การเบิกจ่าย (Tax Compliance)")
+                    st.markdown(f"**ประเภทเอกสาร:** {tax_info['doc_type']}")
+                    st.markdown(f"**เลขประจำตัวผู้เสียภาษี 13 หลัก:** `{tax_info['tax_id']}`")
+                    st.markdown(f"**สิทธิ์เคลมภาษีซื้อ (VAT):** {tax_info['claimable']}")
+                    st.markdown(f"**สถานะการเบิกจ่าย:** **{tax_info['status']}**")
+                    st.caption(tax_info['notes'])
+
+            # Row 2: Fraud Risk & Anomaly Detection
+            with st.container(border=True):
+                st.markdown("##### 🛡️ ระบบตรวจจับความผิดปกติและความเสี่ยงทุจริต (Fraud & Anomaly Detection)")
+                r_col1, r_col2 = st.columns([1, 2.5])
+                with r_col1:
+                    st.metric("ระดับความเสี่ยง (Risk Level)", fraud_info["level"], delta=f"Risk Score: {fraud_info['score']}/100", delta_color="inverse" if fraud_info['score'] > 20 else "normal")
+                with r_col2:
+                    st.markdown("**ผลการตรวจสอบความเสี่ยง (Audit Checklist):**")
+                    for chk in fraud_info["checks"]:
+                        st.markdown(f"- {chk}")
+
+            # Row 3: Executive Summary & Cost-Saving Tips
+            with st.container(border=True):
+                st.markdown("##### 💡 บทสรุปสำหรับผู้บริหารและคำแนะนำ (Executive Insights)")
+                st.info(exec_info["summary"])
+                for rec in exec_info["recommendations"]:
+                    st.markdown(rec)
+
+            # Multi-document Portfolio Overview (If batch mode)
+            if len(successful_documents) > 1:
+                st.markdown("---")
+                st.markdown("#### 📊 ภาพรวมชุดเอกสารทั้งหมด (Batch Portfolio Analytics)")
+                batch_portfolio = api_service.analyze_batch_portfolio(all_results)
+                if batch_portfolio:
+                    bp1, bp2, bp3 = st.columns(3)
+                    bp1.metric("💰 ยอดใช้จ่ายรวมทั้งชุด", f"{batch_portfolio['total_spending']:,.2f} บาท")
+                    bp2.metric("🧾 ยอดภาษีซื้อรวม (VAT)", f"{batch_portfolio['total_vat']:,.2f} บาท")
+                    bp3.metric("✅ ภาษีซื้อที่เคลมได้", f"{batch_portfolio['claimable_vat']:,.2f} บาท")
+
+                    # Duplicates Warning
+                    if batch_portfolio["duplicates"]:
+                        st.error(f"🚨 **ตรวจพบความเสี่ยงเอกสารซ้ำซ้อนในชุด {len(batch_portfolio['duplicates'])} รายการ!**")
+                        for dup in batch_portfolio["duplicates"]:
+                            st.warning(f"**{dup['type']}:** {dup['detail']}")
+                    else:
+                        st.success("✅ ไม่พบเอกสารซ้ำซ้อนหรือยอดซ้ำในชุดเอกสารนี้")
+
+                    # Category Breakdown table
+                    st.markdown("**สัดส่วนค่าใช้จ่ายตามหมวดหมู่ในชุดนี้:**")
+                    cat_rows = []
+                    for c_name, c_tot in batch_portfolio["category_totals"]:
+                        pct = (c_tot / batch_portfolio["total_spending"] * 100) if batch_portfolio["total_spending"] > 0 else 0
+                        cat_rows.append({
+                            "หมวดหมู่ค่าใช้จ่าย": c_name,
+                            "จำนวนเอกสาร": batch_portfolio["category_counts"].get(c_name, 0),
+                            "ยอดรวม (บาท)": f"{c_tot:,.2f}",
+                            "สัดส่วน (%)": f"{pct:.1f}%"
+                        })
+                    st.dataframe(pd.DataFrame(cat_rows), width="stretch", hide_index=True)
+
+        # ------------------ Tab 3: ถาม-ตอบอัจฉริยะ (Chat Q&A) ------------------
+        with tab3:
+            st.markdown("#### ถามข้อมูลจากเอกสาร (Smart Document Q&A)")
+            st.caption(f"ใช้โมเดล {selected_model_name} · ปัญญาประดิษฐ์สกัดและตอบคำถามจากข้อมูลจริงในเอกสาร")
+            
+            # Format comprehensive Thai document context
+            context_to_send = api_service.format_document_context_for_qa(doc_data, raw_content)
+            
+            def submit_question(q_text):
+                st.session_state.chat_history.append({"role": "user", "content": q_text})
+                with st.spinner("🤖 AI กำลังค้นหาคำตอบจากเอกสาร..."):
+                    ans_obj = api_service.ask_document_qa(context_to_send, q_text, selected_model_id)
+                    reply = ans_obj.get("answer") if ans_obj.get("success") else f"❌ {ans_obj.get('error')}"
+                    st.session_state.chat_history.append({
+                        "role": "assistant", 
+                        "content": reply, 
+                        "time": ans_obj.get("elapsed_time")
+                    })
+                st.rerun()
+
+            st.markdown("**💡 คำถามด่วน:**")
+            is_slip = (doc_data and doc_data.get("transfer_amount") is not None)
+            
+            if is_slip:
+                qc1, qc2, qc3, qc4 = st.columns(4)
+                if qc1.button("💸 สรุปยอดโอนและค่าธรรมเนียม", width="stretch"):
+                    submit_question("สรุปยอดเงินโอน ค่าธรรมเนียม และยอดหักบัญชีทั้งหมดของสลิปนี้")
+                if qc2.button("👤 ผู้โอนและผู้รับเงิน", width="stretch"):
+                    submit_question("ใครเป็นผู้โอนเงิน และโอนเงินไปยังใคร?")
+                if qc3.button("🧾 วันที่ เวลา และเลขอ้างอิง", width="stretch"):
+                    submit_question("ทำรายการเมื่อวันที่และเวลาใด และมีรหัสอ้างอิงหรือเลขที่ทำรายการอะไรบ้าง?")
+                if qc4.button("🏷️ หมวดหมู่บัญชีและสิทธิ์เบิก", width="stretch"):
+                    submit_question("รายการนี้ควรลงบัญชีหมวดไหน และใช้เบิกบริษัทได้หรือไม่?")
+            else:
+                qc1, qc2, qc3, qc4 = st.columns(4)
+                if qc1.button("📦 สรุปรายการสินค้าและราคา", width="stretch"):
+                    submit_question("ในเอกสารนี้มีรายการสินค้าหรือบริการอะไรบ้าง แต่ละรายการราคาเท่าไหร่?")
+                if qc2.button("💰 สรุปยอดเงินและภาษี VAT", width="stretch"):
+                    submit_question("สรุปยอดรวม ยอดก่อนภาษี ภาษีมูลค่าเพิ่ม (VAT) และส่วนลดของเอกสารนี้")
+                if qc3.button("🏆 สินค้าราคาสูงสุดและต่ำสุด", width="stretch"):
+                    submit_question("สินค้าชิ้นไหนราคาสูงที่สุด และชิ้นไหนราคาต่ำที่สุด คิดเป็นกี่บาท?")
+                if qc4.button("🏢 ร้านค้าและข้อมูลผู้ขาย", width="stretch"):
+                    submit_question("เอกสารนี้ออกจากร้านค้าใด มีเลขที่ใบเสร็จ หรือข้อมูลที่อยู่/สาขาอะไรบ้าง?")
+
+            st.divider()
+            
+            # หน้าต่างแชต
+            chat_box = st.container(height=380)
+            with chat_box:
+                if len(st.session_state.chat_history) == 0:
+                    st.caption("ยังไม่มีบทสนทนา สามารถกดปุ่มคำถามด่วนด้านบนหรือพิมพ์ถามคำถามใดๆ จากเอกสารได้เลยครับ")
+                for msg in st.session_state.chat_history:
+                    with st.chat_message(msg["role"]):
+                        st.markdown(msg["content"])
+                        if "time" in msg and msg["time"]:
+                            st.caption(f"⏱️ ตอบโดย AI ใน {msg['time']} วินาที")
+
+            user_query = st.chat_input("พิมพ์คำถามเกี่ยวกับเอกสาร เช่น 'ซื้ออะไรไปบ้าง?' หรือ 'คิดเป็นเงินกี่บาท?'")
+            if user_query:
+                submit_question(user_query)
+
+        # ------------------ Tab 4: ตรวจสอบยอด & ตัวช่วยเสริม (Audit & Accessibility) ------------------
+        with tab4:
+            st.markdown("#### ตรวจสอบความสอดคล้องของสมการยอดเงิน (Financial Audit)")
             st.caption("ระบบตรวจเฉพาะสมการที่มีตัวเลขครบ หากข้อมูลบางส่วนอ่านไม่ได้จะแจ้งว่าต้องตรวจเพิ่ม")
             
             audit = api_service.audit_financials(doc_data)
@@ -839,9 +973,25 @@ with col_display:
             else:
                 st.info(audit["msg"])
                 
-            # Optional sentiment analysis is run only on request.
-            st.markdown("---")
-            st.markdown("#### เครื่องมือเสริม: วิเคราะห์โทนข้อความ")
+            st.divider()
+            st.markdown("#### 🎧 สังเคราะห์เสียงอ่านสรุปเอกสาร (Vaja Text-to-Speech)")
+            st.caption(f"ระดับเสียง: {voice_gender}")
+            if st.button("สร้างเสียงอ่านสรุปผลภาษาไทย", disabled=not api_service.AIFORTHAI_APIKEY):
+                tail = "ค่ะ" if voice_mode == "female" else "ครับ"
+                store_txt = doc_data.get("store_name", "เอกสาร") if doc_data else "เอกสาร"
+                financial_summary = api_service.summarize_document_data(doc_data or {})
+                text_to_speak = f"เอกสารจาก {store_txt} {financial_summary}{tail}"
+                st.session_state.tts_audio_url = api_service.call_vaja_tts(text_to_speak, mode=voice_mode)
+                st.rerun()
+            if st.session_state.tts_audio_url:
+                st.audio(st.session_state.tts_audio_url)
+            elif not api_service.AIFORTHAI_APIKEY:
+                st.caption("ต้องตั้งค่า AI For Thai API key เพื่อใช้เสียงอ่าน")
+            else:
+                st.caption("ยังไม่ได้กดสร้างเสียงอ่านผล")
+
+            st.divider()
+            st.markdown("#### 📊 วิเคราะห์โทนข้อความเอกสาร (SSense Sentiment Analysis)")
             sentiment_res = res.get("sentiment_result")
             if st.button("วิเคราะห์โทนข้อความด้วย SSense", key="run_sentiment", disabled=not api_service.AIFORTHAI_APIKEY):
                 sample_text = (doc_data.get("ocr_text", "") if doc_data else raw_content)[:120]
@@ -865,82 +1015,3 @@ with col_display:
                     st.caption("ยังไม่ได้ตั้งค่า AI For Thai API key")
                 else:
                     st.caption("ยังไม่ได้เรียกใช้เครื่องมือนี้")
-
-        # ------------------ Tab 3: ถาม-ตอบอัจฉริยะ (Chat Q&A) ------------------
-        with tab3:
-            st.markdown("#### ถามข้อมูลจากเอกสาร")
-            st.caption(f"ใช้โมเดล {selected_model_name} · คำตอบเป็นข้อมูลช่วยตรวจทาน โปรดเทียบกับเอกสารต้นฉบับ")
-            
-            st.markdown("**💡 คำถามด่วน:**")
-            qc1, qc2, qc3 = st.columns(3)
-            
-            context_to_send = json.dumps(doc_data, ensure_ascii=False) if doc_data else raw_content
-            
-            def submit_question(q_text):
-                st.session_state.chat_history.append({"role": "user", "content": q_text})
-                with st.spinner("🤖 AI กำลังค้นหาข้อมูลจากเอกสาร..."):
-                    ans_obj = api_service.ask_document_qa(context_to_send, q_text, selected_model_id)
-                    reply = ans_obj.get("answer") if ans_obj.get("success") else f"❌ {ans_obj.get('error')}"
-                    st.session_state.chat_history.append({
-                        "role": "assistant", 
-                        "content": reply, 
-                        "time": ans_obj.get("elapsed_time")
-                    })
-                st.rerun()
-
-            if qc1.button("💰 สรุปยอดเงินและ VAT", width="stretch"):
-                submit_question("สรุปยอดรวม ยอดก่อนภาษี และภาษีมูลค่าเพิ่ม (VAT) ของเอกสารนี้")
-            if qc2.button("🧾 เลขที่และวันที่เอกสาร", width="stretch"):
-                submit_question("เอกสารนี้ออกวันที่เท่าไหร่ มีเลขที่ใบเสร็จหรือเลขอ้างอิงอะไรบ้าง?")
-            if qc3.button("📦 สินค้าราคาสูงสุด", width="stretch"):
-                submit_question("ในรายการสินค้าทั้งหมด สินค้าชิ้นไหนราคาสูงที่สุด และคิดเป็นกี่บาท?")
-
-            st.divider()
-            
-            # หน้าต่างแชต
-            chat_box = st.container(height=350)
-            with chat_box:
-                if len(st.session_state.chat_history) == 0:
-                    st.caption("ยังไม่มีบทสนทนา สามารถกดคำถามด่วนด้านบนหรือพิมพ์ถามด้านล่างได้เลยครับ")
-                for msg in st.session_state.chat_history:
-                    with st.chat_message(msg["role"]):
-                        st.markdown(msg["content"])
-                        if "time" in msg and msg["time"]:
-                            st.caption(f"⏱️ ประมวลผลใน {msg['time']} วินาที")
-
-            user_query = st.chat_input("พิมพ์คำถามเกี่ยวกับเอกสาร เช่น 'มีส่วนลดหรือไม่?'")
-            if user_query:
-                submit_question(user_query)
-
-        # ------------------ Tab 4: เปรียบเทียบโมเดล AI (Benchmarking พร้อม Scrollbox) ------------------
-        with tab4:
-            st.markdown("#### เปรียบเทียบโมเดลสำหรับการทดลอง")
-            st.caption("เครื่องมือวิจัยเสริม: ส่งคำถามเดียวกันไปยัง 3 โมเดลและเปรียบเทียบคำตอบ/เวลา อาจใช้โควตา API เพิ่ม")
-            
-            test_question = st.text_input(
-                "คำถามทดสอบเปรียบเทียบ:",
-                value="สรุปสาระสำคัญของเอกสารนี้ พร้อมระบุยอดเงินที่ต้องชำระเป็นภาษาไทย"
-            )
-
-            if st.button("⚡ กดรันเปรียบเทียบ 3 โมเดลพร้อมกัน", type="secondary", width="stretch"):
-                with st.spinner("กำลังส่งคำถามไปยัง OpenThaiGPT, Typhoon และ Pathumma..."):
-                    context_bench = json.dumps(doc_data, ensure_ascii=False) if doc_data else raw_content
-                    cmp_res = api_service.compare_models(context_bench, test_question)
-                    st.session_state.compare_results = cmp_res
-                    st.success("✅ ประมวลผลเปรียบเทียบเสร็จสิ้น!")
-
-            if st.session_state.compare_results:
-                cmp = st.session_state.compare_results
-                b_cols = st.columns(3)
-                
-                idx = 0
-                for model_label, res_data in cmp.items():
-                    with b_cols[idx]:
-                        st.markdown(f'<div class="benchmark-header">🤖 {model_label}</div>', unsafe_allow_html=True)
-                        if res_data.get("success"):
-                            st.markdown(f'<span class="benchmark-badge">⏱️ ความเร็ว: {res_data.get("elapsed_time")} วินาที</span>', unsafe_allow_html=True)
-                            ans_html = html.escape(res_data.get("answer", "")).replace("\n", "<br>")
-                            st.markdown(f'<div class="benchmark-box">{ans_html}</div>', unsafe_allow_html=True)
-                        else:
-                            st.error(f"เกิดข้อผิดพลาด: {res_data.get('error')}")
-                    idx += 1
