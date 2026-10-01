@@ -7,7 +7,7 @@ import re
 import threading
 import time
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import soundfile as sf
@@ -654,8 +654,31 @@ def extract_document_intelligence(image_bytes, mime_type="image/jpeg", max_attem
     # A schema mismatch, truncated response, or meta-commentary reply is often a
     # one-off formatting slip from the vision model rather than a real failure, so
     # retry automatically instead of making the user click "process" again.
+    # Typhoon OCR is independent of the Qwen call, so start it now and let both run at
+    # the same time instead of waiting for Qwen first (saves one full OCR round-trip).
+    typhoon_pool = None
+    typhoon_future = None
+    if TYPHOON_OCR_APIKEY:
+        typhoon_pool = ThreadPoolExecutor(max_workers=1)
+        typhoon_future = typhoon_pool.submit(_typhoon_ocr_request, image_bytes)
+
+    try:
+        return _extract_with_retries(
+            image_bytes, optimized_mime, image_data, url, headers, output_schema,
+            payload, max_attempts, typhoon_future,
+        )
+    finally:
+        if typhoon_pool is not None:
+            typhoon_pool.shutdown(wait=False)
+
+
+def _extract_with_retries(image_bytes, optimized_mime, image_data, url, headers,
+                          output_schema, payload, max_attempts, typhoon_future):
     last_result = None
     for attempt in range(max_attempts):
+        if attempt > 0:
+            # Back off before retrying so a busy/rate-limited API has time to recover.
+            time.sleep(min(2.0 * attempt, 6.0))
         result = _extract_document_intelligence_once(
             optimized_mime, image_data, url, headers, output_schema, payload
         )
@@ -664,7 +687,10 @@ def extract_document_intelligence(image_bytes, mime_type="image/jpeg", max_attem
             data = result["data"]
             normalize_document_date(data)
             if data.get("transfer_amount") is not None:
-                typhoon_text, typhoon_status = _typhoon_ocr_request(image_bytes)
+                if typhoon_future is not None:
+                    typhoon_text, typhoon_status = typhoon_future.result()
+                else:
+                    typhoon_text, typhoon_status = _typhoon_ocr_request(image_bytes)
                 if typhoon_text:
                     apply_ocr_crosscheck(data, typhoon_text)
                 typhoon_names = names_from_ocr_text(typhoon_text)
@@ -689,24 +715,36 @@ def extract_document_intelligence(image_bytes, mime_type="image/jpeg", max_attem
     return last_result
 
 
-def extract_documents_batch(documents, max_workers=5):
+def extract_documents_batch(documents, max_workers=6, progress_callback=None):
+    """Process (file_name, bytes, mime) tuples in parallel; results keep input order.
+
+    progress_callback(done, total) is called from the calling thread as each file finishes.
+    """
     if not documents:
         return []
 
     worker_count = min(max(1, max_workers), len(documents))
+    results = [None] * len(documents)
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        futures = [
-            executor.submit(extract_document_intelligence, image_bytes, mime_type)
-            for _, image_bytes, mime_type in documents
-        ]
-        results = []
-        for (file_name, _, _), future in zip(documents, futures):
+        future_to_index = {
+            executor.submit(extract_document_intelligence, image_bytes, mime_type): index
+            for index, (_, image_bytes, mime_type) in enumerate(documents)
+        }
+        done = 0
+        for future in as_completed(future_to_index):
+            index = future_to_index[future]
             try:
                 result = future.result()
             except Exception as error:
                 result = {"success": False, "error": str(error)}
-            result["file_name"] = file_name
-            results.append(result)
+            result["file_name"] = documents[index][0]
+            results[index] = result
+            done += 1
+            if progress_callback:
+                try:
+                    progress_callback(done, len(documents))
+                except Exception:
+                    pass
     return results
 
 

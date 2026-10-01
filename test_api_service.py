@@ -304,12 +304,23 @@ class TyphoonNameTests(unittest.TestCase):
         r.json.return_value = {"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}
         return r
 
+    def _router(self, typhoon, *qwen_responses):
+        """Route mocked POSTs by URL (Typhoon now runs in parallel with Qwen)."""
+        qwen_iter = iter(qwen_responses)
+
+        def _post(url, *args, **kwargs):
+            if url == api_service.TYPHOON_OCR_URL:
+                return typhoon
+            return next(qwen_iter)
+
+        return _post
+
     def test_typhoon_names_override_qwen_and_skip_second_qwen_pass(self):
         first = self._resp('{"raw_ocr": "x", "data": {"transfer_amount": 30, "total": 30, "store_name": "ผิด", "items": []}}')
         typhoon = self._resp(self.SLIP)
         with patch.object(api_service, "THAILLM_APIKEY", "k"), patch.object(
             api_service, "TYPHOON_OCR_APIKEY", "t"
-        ), patch.object(api_service._http_session, "post", side_effect=[first, typhoon]) as post:
+        ), patch.object(api_service._http_session, "post", side_effect=self._router(typhoon, first)) as post:
             result = api_service.extract_document_intelligence(b"img")
         self.assertEqual(post.call_count, 2)
         self.assertEqual(result["data"]["store_name"], "นาย ปรเมศ ไชยนาพันธุ์")
@@ -322,7 +333,7 @@ class TyphoonNameTests(unittest.TestCase):
         refine = self._resp('{"receiver_name": "นาย ข"}')
         with patch.object(api_service, "THAILLM_APIKEY", "k"), patch.object(
             api_service, "TYPHOON_OCR_APIKEY", "t"
-        ), patch.object(api_service._http_session, "post", side_effect=[first, typhoon, refine]):
+        ), patch.object(api_service._http_session, "post", side_effect=self._router(typhoon, first, refine)):
             result = api_service.extract_document_intelligence(b"img")
         self.assertEqual(result["data"]["store_name"], "นาย ข")
 

@@ -71,6 +71,18 @@ theme_colors = {
     "workflow_border": "rgba(216, 164, 71, 0.28)" if is_dark_mode else "rgba(36, 86, 71, 0.22)",
 }
 
+# Streamlit's native widgets (dataframe canvas, etc.) follow Streamlit's own theme, not our CSS.
+# When it differs from the app's chosen mode, invert those canvas widgets so they match.
+try:
+    native_dark = str(st.context.theme.type) == "dark"
+except Exception:
+    native_dark = None
+grid_filter = (
+    "filter: invert(1) hue-rotate(180deg);"
+    if native_dark is not None and native_dark != is_dark_mode
+    else ""
+)
+
 # Styling for a document-review workbench with full dark/light mode responsiveness
 st.markdown(f"""
 <style>
@@ -247,6 +259,73 @@ st.markdown(f"""
         font-weight: 600; 
         margin-bottom: 8px; 
     }}
+    /* ---- extra widgets that did not follow the selected theme ---- */
+    [data-testid="stDataFrame"], [data-testid="stDataEditor"] {{ {grid_filter} }}
+    [data-testid="stTextArea"] textarea, textarea {{
+        background: {theme_colors['surface_alt']} !important;
+        color: {theme_colors['main_text']} !important;
+        border-color: {theme_colors['border']} !important;
+        -webkit-text-fill-color: {theme_colors['main_text']} !important;
+    }}
+    [data-testid="stTextInput"] input, [data-testid="stNumberInput"] input {{
+        -webkit-text-fill-color: {theme_colors['main_text']} !important;
+    }}
+    [data-testid="stNumberInput"] button {{
+        background: {theme_colors['surface_alt']} !important;
+        color: {theme_colors['main_text']} !important;
+        border-color: {theme_colors['border']} !important;
+    }}
+    [data-testid="stChatInput"], [data-testid="stChatInput"] > div {{
+        background: {theme_colors['surface_alt']} !important;
+        border-color: {theme_colors['border']} !important;
+    }}
+    [data-testid="stChatInput"] textarea {{ color: {theme_colors['main_text']} !important; }}
+    [data-testid="stBottom"], [data-testid="stBottom"] > div, [data-testid="stBottomBlockContainer"] {{
+        background: {theme_colors['main_bg']} !important;
+    }}
+    [data-testid="stChatMessage"] {{
+        background: {theme_colors['surface']} !important;
+        border: 1px solid {theme_colors['border']} !important;
+        border-radius: 10px !important;
+    }}
+    [data-testid="stChatMessage"] * {{ color: {theme_colors['main_text']} !important; }}
+    [data-testid="stTabs"] [data-baseweb="tab-list"] {{ background: transparent !important; border-bottom: 1px solid {theme_colors['border']} !important; }}
+    [data-testid="stTabs"] [data-baseweb="tab"] {{ background: transparent !important; }}
+    [data-testid="stTabs"] [data-baseweb="tab"] p, [data-testid="stTabs"] button[role="tab"] {{ color: {theme_colors['muted']} !important; }}
+    [data-testid="stTabs"] [aria-selected="true"] p, [data-testid="stTabs"] button[aria-selected="true"] {{ color: {theme_colors['main_text']} !important; font-weight: 600 !important; }}
+    [data-testid="stAlert"], [data-testid="stNotification"] {{ border: 1px solid {theme_colors['border']} !important; }}
+    [data-testid="stAlert"] *, [data-testid="stNotification"] * {{ color: {theme_colors['main_text']} !important; }}
+    [data-testid="stText"], [data-testid="stCode"], [data-testid="stCode"] pre, pre, code {{
+        background: {theme_colors['surface_alt']} !important;
+        color: {theme_colors['main_text']} !important;
+    }}
+    [data-testid="stExpander"] summary, [data-testid="stExpander"] summary *,
+    [data-testid="stExpander"] details {{ background: transparent !important; color: {theme_colors['main_text']} !important; }}
+    [data-testid="stFileUploaderDropzone"] button, [data-testid="stFileUploader"] small {{
+        background: {theme_colors['surface_alt']} !important;
+        color: {theme_colors['main_text']} !important;
+        border-color: {theme_colors['border']} !important;
+    }}
+    [data-testid="stFileUploaderFile"], [data-testid="stFileUploaderFileName"] {{ color: {theme_colors['main_text']} !important; }}
+    [data-testid="stDownloadButton"] button, [data-testid="stBaseButton-secondaryFormSubmit"] {{
+        background: {theme_colors['surface_alt']} !important;
+        color: {theme_colors['main_text']} !important;
+        border: 1px solid {theme_colors['border']} !important;
+    }}
+    .stButton > button p, [data-testid="stBaseButton-secondary"] p {{ color: {theme_colors['main_text']} !important; }}
+    [data-testid="stBaseButton-primary"] p {{ color: #FFFFFF !important; }}
+    [data-testid="stProgress"] > div > div {{ background-color: {theme_colors['surface_alt']} !important; }}
+    [data-testid="stSpinner"] *, [data-testid="stSidebar"] * {{ color: {theme_colors['main_text']} !important; }}
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"] * {{ color: {theme_colors['muted']} !important; }}
+    [data-testid="stHeading"] *, h1, h2, h3, h4, h5, h6 {{ color: {theme_colors['main_text']} !important; }}
+    [data-testid="stRadio"] [role="radiogroup"] * {{ color: {theme_colors['main_text']} !important; }}
+    [data-testid="stMarkdownContainer"] table, [data-testid="stMarkdownContainer"] th, [data-testid="stMarkdownContainer"] td {{
+        color: {theme_colors['main_text']} !important; border-color: {theme_colors['border']} !important;
+    }}
+    [data-testid="stMarkdownContainer"] th {{ background: {theme_colors['surface_alt']} !important; }}
+    [data-testid="stTooltipContent"], div[data-baseweb="tooltip"] > div {{
+        background: {theme_colors['surface']} !important; color: {theme_colors['main_text']} !important;
+    }}
     @media (max-width: 700px) {{ 
         .main-header {{ padding: 14px; }}
         .main-header h1 {{ font-size: 1.3rem; }}
@@ -304,6 +383,8 @@ if "upload_revision" not in st.session_state:
     st.session_state.upload_revision = 0
 if "last_batch_elapsed" not in st.session_state:
     st.session_state.last_batch_elapsed = None
+if "batch_sources" not in st.session_state:
+    st.session_state.batch_sources = {}
 
 # ==================== Sidebar เมนูด้านข้าง ====================
 with st.sidebar:
@@ -329,6 +410,7 @@ with st.sidebar:
         st.session_state.tts_audio_url = None
         st.session_state.compare_results = None
         st.session_state.last_batch_elapsed = None
+        st.session_state.batch_sources = {}
         st.session_state.review_revision = st.session_state.get("review_revision", 0) + 1
         st.session_state.upload_revision += 1
         st.rerun()
@@ -339,7 +421,7 @@ col_upload, col_display = st.columns([1, 1.25], gap="large")
 with col_upload:
     st.subheader("1 · เพิ่มเอกสาร")
     st.caption("📁 **ระบบรองรับการอัปโหลดหลายภาพพร้อมกัน (Batch Multi-Upload)** · รองรับ JPG/PNG")
-    st.caption("⚡ **ประมวลผลความเร็วสูง (< 3 วินาที/ภาพ)**: ระบบจะย่อขนาดและส่งประมวลผลแบบขนานอัตโนมัติ")
+    st.caption("⚡ **ประมวลผลแบบขนาน**: ระบบย่อขนาดภาพและส่งประมวลผลพร้อมกันหลายภาพอัตโนมัติ (สลิปโอนเงินจะใช้เวลานานกว่าใบเสร็จเล็กน้อย)")
     st.caption("ความเป็นส่วนตัว: ภาพจะถูกส่งไปประมวลผลผ่าน ThaiLLM API · แอปไม่เก็บประวัติถาวร ให้ดาวน์โหลด JSON/CSV หลังยืนยัน")
 
     uploaded_files = st.file_uploader(
@@ -365,7 +447,7 @@ with col_upload:
         )
         
         if btn_scan:
-            with st.spinner(f"⚡ กำลังประมวลผล {len(uploaded_files)} ภาพพร้อมกันด้วย AI ความเร็วสูง (< 3 วิ/ภาพ)..."):
+            with st.spinner(f"⚡ กำลังประมวลผล {len(uploaded_files)} ภาพพร้อมกันด้วย AI..."):
                 st.session_state.scan_result = None
                 batch_inputs = []
                 for uploaded_file in uploaded_files:
@@ -376,8 +458,17 @@ with col_upload:
                         uploaded_file.type or "image/jpeg",
                     ))
 
+                st.session_state.batch_sources = {i: item for i, item in enumerate(batch_inputs)}
+                progress_bar = st.progress(0.0, text=f"เสร็จแล้ว 0/{len(batch_inputs)} ภาพ")
+
+                def _on_progress(done, total):
+                    progress_bar.progress(done / total, text=f"เสร็จแล้ว {done}/{total} ภาพ")
+
                 batch_started = time.perf_counter()
-                batch_results = api_service.extract_documents_batch(batch_inputs, max_workers=5)
+                batch_results = api_service.extract_documents_batch(
+                    batch_inputs, max_workers=6, progress_callback=_on_progress
+                )
+                progress_bar.empty()
                 batch_elapsed = time.perf_counter() - batch_started
                 for result in batch_results:
                     result["sentiment_result"] = None
@@ -403,6 +494,50 @@ with col_upload:
                     if failed.get("raw_content"):
                         with st.expander(f"ดูคำตอบดิบจากโมเดล · {failed.get('file_name', '')}"):
                             st.text(failed.get("raw_content"))
+
+    # ---- retry only the images that failed (works across reruns) ----
+    _sources = st.session_state.get("batch_sources", {})
+    _failed_idx = [
+        i for i, r in enumerate(st.session_state.scan_results)
+        if not r.get("success") and i in _sources
+    ]
+    if _failed_idx:
+        st.error(f"❌ ประมวลผลไม่สำเร็จ {len(_failed_idx)} ภาพ")
+        with st.expander("ดูรายการที่ล้มเหลวและสาเหตุ", expanded=False):
+            for i in _failed_idx:
+                r = st.session_state.scan_results[i]
+                st.caption(f"#{i + 1} {r.get('file_name', '')}: {r.get('error', 'ประมวลผลไม่สำเร็จ')}")
+        if st.button(
+            f"🔁 ประมวลผลซ้ำเฉพาะ {len(_failed_idx)} ภาพที่ล้มเหลว",
+            type="primary",
+            width="stretch",
+            key="retry_failed_btn",
+        ):
+            retry_inputs = [_sources[i] for i in _failed_idx]
+            retry_bar = st.progress(0.0, text=f"เสร็จแล้ว 0/{len(retry_inputs)} ภาพ")
+
+            def _on_retry_progress(done, total):
+                retry_bar.progress(done / total, text=f"เสร็จแล้ว {done}/{total} ภาพ")
+
+            with st.spinner(f"กำลังประมวลผลซ้ำ {len(retry_inputs)} ภาพ..."):
+                retry_results = api_service.extract_documents_batch(
+                    retry_inputs, max_workers=3, progress_callback=_on_retry_progress
+                )
+            retry_bar.empty()
+            for i, new_result in zip(_failed_idx, retry_results):
+                new_result["sentiment_result"] = None
+                new_result["verified"] = False
+                st.session_state.scan_results[i] = new_result
+            current = st.session_state.selected_document_index
+            if not st.session_state.scan_results[current].get("success"):
+                first_ok = next((i for i, r in enumerate(st.session_state.scan_results) if r.get("success")), None)
+                if first_ok is not None:
+                    st.session_state.selected_document_index = first_ok
+            if st.session_state.scan_results:
+                st.session_state.scan_result = st.session_state.scan_results[st.session_state.selected_document_index]
+            st.session_state.review_revision = st.session_state.get("review_revision", 0) + 1
+            st.session_state.chat_history = []
+            st.rerun()
 
 with col_display:
     st.subheader("2 · ตรวจทานและจัดการผลลัพธ์")
