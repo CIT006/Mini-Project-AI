@@ -46,324 +46,247 @@ st.set_page_config(
 )
 
 if "theme_mode" not in st.session_state:
-    st.session_state.theme_mode = "🌙 กลางคืน"
+    st.session_state.theme_mode = "☀️ สว่าง"
 is_dark_mode = "สว่าง" not in str(st.session_state.theme_mode)
 
-theme_colors = {
-    "main_bg": "#111815" if is_dark_mode else "#F8FAF8",
-    "main_text": "#E6ECE7" if is_dark_mode else "#142820",
-    "sidebar_bg": "#18221E" if is_dark_mode else "#EDF3EE",
-    "surface": "#202C27" if is_dark_mode else "#FFFFFF",
-    "surface_alt": "#26342E" if is_dark_mode else "#F2F7F4",
-    "border": "#3A4941" if is_dark_mode else "#D1DDD5",
-    "muted": "#B8C4BD" if is_dark_mode else "#52665C",
-    "header_bg": (
-        "linear-gradient(135deg, #16241E 0%, #1F3229 100%)"
-        if is_dark_mode
-        else "linear-gradient(135deg, #FFFFFF 0%, #EEF6F1 100%)"
-    ),
-    "header_border": "#D8A447" if is_dark_mode else "#245647",
-    "header_box_border": "#2D3E35" if is_dark_mode else "#C8D7CE",
-    "header_title": "#F7F5EE" if is_dark_mode else "#112F24",
-    "header_subtext": "#D0DED5" if is_dark_mode else "#3B574C",
-    "workflow_bg": "rgba(216, 164, 71, 0.12)" if is_dark_mode else "rgba(36, 86, 71, 0.08)",
-    "workflow_color": "#F4D9A1" if is_dark_mode else "#194A3B",
-    "workflow_border": "rgba(216, 164, 71, 0.28)" if is_dark_mode else "rgba(36, 86, 71, 0.22)",
+LIGHT = {
+    "bg": "#F3F6F9", "sidebar": "#FFFFFF", "surface": "#FFFFFF", "surface-alt": "#EEF2F6",
+    "border": "#D9E1E8", "border-strong": "#B7C4D0", "text": "#142033", "muted": "#566579",
+    "accent": "#0F766E", "accent-soft": "rgba(15,118,110,0.10)", "accent-text": "#0F766E",
+    "primary-bg": "#0F766E", "primary-fg": "#FFFFFF",
+    "hero": "linear-gradient(120deg, #0F766E 0%, #0E5F66 55%, #1E4E79 100%)",
+    "shadow": "0 1px 3px rgba(20,32,51,0.08), 0 4px 14px rgba(20,32,51,0.05)",
+    "ok-bg": "#E6F6EF", "ok-bd": "#2F9E6F", "info-bg": "#E8F1FB", "info-bd": "#3B82C4",
+    "warn-bg": "#FFF4DE", "warn-bd": "#D9922B", "err-bg": "#FDECEC", "err-bd": "#D14B4B",
+    "scheme": "light",
 }
+DARK = {
+    "bg": "#0C1218", "sidebar": "#101820", "surface": "#141D27", "surface-alt": "#1B2633",
+    "border": "#263443", "border-strong": "#3A4B5D", "text": "#E7EDF3", "muted": "#9BAABA",
+    "accent": "#2DD4BF", "accent-soft": "rgba(45,212,191,0.12)", "accent-text": "#5EEAD4",
+    "primary-bg": "#14B8A6", "primary-fg": "#04201D",
+    "hero": "linear-gradient(120deg, #0B3B3A 0%, #0F3550 60%, #1B2E55 100%)",
+    "shadow": "0 1px 3px rgba(0,0,0,0.4), 0 6px 20px rgba(0,0,0,0.25)",
+    "ok-bg": "#12302A", "ok-bd": "#2FB985", "info-bg": "#122B40", "info-bd": "#4B9BE0",
+    "warn-bg": "#3A2C12", "warn-bd": "#E0A53B", "err-bg": "#3C1A1D", "err-bd": "#E16A6A",
+    "scheme": "dark",
+}
+theme_colors = DARK if is_dark_mode else LIGHT
+css_vars = ":root{" + "".join(f"--{k}:{v};" for k, v in theme_colors.items()) + "}"
 
-# Streamlit's native widgets (dataframe canvas, etc.) follow Streamlit's own theme, not our CSS.
-# When it differs from the app's chosen mode, invert those canvas widgets so they match.
+# Streamlit draws dataframe/data_editor on a canvas that CSS colours cannot reach. If Streamlit's
+# own theme differs from the mode chosen here, invert the canvas so it matches.
 try:
     native_dark = str(st.context.theme.type) == "dark"
 except Exception:
     native_dark = None
 grid_filter = (
-    "filter: invert(1) hue-rotate(180deg);"
+    "filter: invert(0.92) hue-rotate(180deg);"
     if native_dark is not None and native_dark != is_dark_mode
     else ""
 )
 
-# Styling for a document-review workbench with full dark/light mode responsiveness
-st.markdown(f"""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@300;400;500;600;700&display=swap');
-    html, body, [class*="css"] {{ font-family: 'IBM Plex Sans Thai', sans-serif; }}
-    .block-container {{ max-width: 1440px; padding-top: 1.2rem; }}
-    
-    /* Streamlit native header bug fix for Light Mode */
-    header[data-testid="stHeader"], .stAppHeader {{
-        background-color: {theme_colors['main_bg']} !important;
-        color: {theme_colors['main_text']} !important;
-    }}
-    header[data-testid="stHeader"] button, 
-    header[data-testid="stHeader"] svg,
-    [data-testid="stSidebarCollapseButton"] button {{
-        color: {theme_colors['main_text']} !important;
-        fill: {theme_colors['main_text']} !important;
-    }}
-    [data-testid="stDecoration"] {{
-        background-image: linear-gradient(90deg, #245647, {theme_colors['header_border']}) !important;
-    }}
-    [data-testid="stToolbar"] {{
-        color: {theme_colors['main_text']} !important;
-    }}
-    /* Hide Deploy button completely */
-    .stDeployButton, [data-testid="stAppDeployButton"], header [data-testid="stToolbar"] .stDeployButton, [data-testid="manage-app-button"] {{
-        display: none !important;
-        visibility: hidden !important;
-    }}
-    
-    .stApp {{ background: {theme_colors['main_bg']} !important; color: {theme_colors['main_text']} !important; }}
-    [data-testid="stSidebar"] > div:first-child {{ background: {theme_colors['sidebar_bg']} !important; }}
-    [data-testid="stWidgetLabel"] p, [data-testid="stMarkdownContainer"], label {{ color: {theme_colors['main_text']} !important; }}
-    [data-testid="stCaptionContainer"] {{ color: {theme_colors['muted']} !important; }}
-    [data-testid="stMetric"] {{ 
-        background: {theme_colors['surface']} !important; 
-        color: {theme_colors['main_text']} !important; 
-        padding: 12px 14px !important; 
-        border-radius: 8px !important; 
-        border: 1px solid {theme_colors['border']} !important;
-    }}
-    [data-testid="stMetricLabel"] p {{ color: {theme_colors['muted']} !important; font-size: 0.88rem !important; }}
-    [data-testid="stMetricValue"] {{ color: {theme_colors['main_text']} !important; font-weight: 700 !important; }}
-    
-    div[data-testid="stForm"] {{ background: {theme_colors['surface']}; border: 1px solid {theme_colors['border']}; border-radius: 10px; padding: 16px; }}
-    [data-testid="stTextInput"] input, [data-testid="stNumberInput"] input {{ 
-        background: {theme_colors['surface_alt']} !important; 
-        color: {theme_colors['main_text']} !important; 
-        border-color: {theme_colors['border']} !important; 
-    }}
-    [data-testid="stDataFrame"] {{ border-color: {theme_colors['border']}; border-radius: 8px; overflow: hidden; }}
-    [data-testid="stRadio"] label {{ color: {theme_colors['main_text']} !important; }}
-    [data-testid="stBaseButton-secondary"], [data-testid="stBaseButton-minimal"], .stButton > button {{
-        background: {theme_colors['surface_alt']} !important; 
-        color: {theme_colors['main_text']} !important;
-        border: 1px solid {theme_colors['border']} !important;
-        border-radius: 6px !important;
-    }}
-    [data-testid="stBaseButton-primary"] {{ 
-        background: #245647 !important; 
-        color: #FFFFFF !important; 
-        border: 1px solid #1c4538 !important; 
-        font-weight: 600 !important;
-    }}
-    [data-testid="stFileUploaderDropzone"] {{ 
-        background: {theme_colors['surface']} !important; 
-        border: 2px dashed {theme_colors['border']} !important; 
-        border-radius: 10px !important;
-    }}
-    [data-testid="stFileUploaderDropzone"] *, [data-testid="stFileUploaderDropzone"] p {{ color: {theme_colors['main_text']} !important; }}
-    [data-testid="stExpander"] {{ 
-        background: {theme_colors['surface']} !important; 
-        border: 1px solid {theme_colors['border']} !important; 
-        border-radius: 8px !important;
-    }}
-    /* Selectbox styling for full dark/light consistency */
-    div[data-baseweb="select"] > div {{ 
-        background-color: {theme_colors['surface_alt']} !important; 
-        color: {theme_colors['main_text']} !important; 
-        border: 1px solid {theme_colors['border']} !important; 
-        border-radius: 8px !important;
-    }}
-    div[data-baseweb="select"] * {{ 
-        color: {theme_colors['main_text']} !important; 
-        fill: {theme_colors['main_text']} !important; 
-    }}
-    div[data-baseweb="popover"], div[data-baseweb="menu"], ul[data-testid="stSelectboxVirtualDropdown"] {{ 
-        background-color: {theme_colors['surface']} !important; 
-        border: 1px solid {theme_colors['border']} !important; 
-        border-radius: 8px !important; 
-    }}
-    div[data-baseweb="menu"] li, ul[data-testid="stSelectboxVirtualDropdown"] li {{ 
-        color: {theme_colors['main_text']} !important; 
-        background-color: transparent !important; 
-    }}
-    div[data-baseweb="menu"] li:hover, ul[data-testid="stSelectboxVirtualDropdown"] li:hover {{ 
-        background-color: {theme_colors['surface_alt']} !important; 
-    }}
-    [data-testid="stVerticalBlockBorderWrapper"] {{ 
-        border-color: {theme_colors['border']} !important; 
-        background-color: {theme_colors['surface']} !important; 
-        border-radius: 10px !important; 
-    }}
-    
-    /* Top Header Bar styling */
-    .main-header {{ 
-        background: {theme_colors['header_bg']}; 
-        padding: 18px 22px; 
-        border-radius: 10px; 
-        color: {theme_colors['header_title']}; 
-        border: 1px solid {theme_colors['header_box_border']}; 
-        border-left: 6px solid {theme_colors['header_border']}; 
-        box-shadow: {'0 4px 20px rgba(0,0,0,0.22)' if is_dark_mode else '0 2px 12px rgba(36,86,71,0.06)'}; 
-        margin-bottom: 12px; 
-    }}
-    .main-header h1 {{ 
-        color: {theme_colors['header_title']} !important; 
-        font-size: 1.55rem; 
-        font-weight: 700; 
-        margin: 0 0 6px 0; 
-    }}
-    .main-header p {{ 
-        color: {theme_colors['header_subtext']} !important; 
-        font-size: 0.95rem; 
-        margin: 0; 
-    }}
-    .workflow-hint {{ 
-        display: flex; 
-        flex-wrap: wrap; 
-        gap: 8px 12px; 
-        margin-top: 12px; 
-    }}
-    .workflow-badge-step {{ 
-        display: inline-flex; 
-        align-items: center; 
-        padding: 3px 10px; 
-        border-radius: 16px; 
-        font-size: 0.82rem; 
-        font-weight: 600; 
-        background: {theme_colors['workflow_bg']}; 
-        color: {theme_colors['workflow_color']}; 
-        border: 1px solid {theme_colors['workflow_border']}; 
-    }}
-    .batch-summary-box {{ 
-        background: {theme_colors['surface']}; 
-        border: 1px solid {theme_colors['border']}; 
-        border-radius: 10px; 
-        padding: 16px; 
-        margin-bottom: 18px; 
-    }}
-    .benchmark-box {{ 
-        background-color: {theme_colors['surface']}; 
-        border: 1px solid {theme_colors['border']}; 
-        border-radius: 8px; 
-        padding: 14px; 
-        height: 380px; 
-        overflow-y: auto; 
-        font-size: 0.95rem; 
-        line-height: 1.6; 
-    }}
-    .benchmark-header {{ 
-        font-weight: 700; 
-        color: {theme_colors['main_text']}; 
-        font-size: 1.05rem; 
-        margin-bottom: 6px; 
-    }}
-    .benchmark-badge {{ 
-        display: inline-block; 
-        background: {theme_colors['surface_alt']}; 
-        color: {theme_colors['main_text']}; 
-        padding: 2px 8px; 
-        border-radius: 12px; 
-        font-size: 0.8rem; 
-        font-weight: 600; 
-        margin-bottom: 8px; 
-    }}
-    /* ---- extra widgets that did not follow the selected theme ---- */
-    [data-testid="stDataFrame"], [data-testid="stDataEditor"] {{ {grid_filter} }}
-    [data-testid="stTextArea"] textarea, textarea {{
-        background: {theme_colors['surface_alt']} !important;
-        color: {theme_colors['main_text']} !important;
-        border-color: {theme_colors['border']} !important;
-        -webkit-text-fill-color: {theme_colors['main_text']} !important;
-    }}
-    [data-testid="stTextInput"] input, [data-testid="stNumberInput"] input {{
-        -webkit-text-fill-color: {theme_colors['main_text']} !important;
-    }}
-    [data-testid="stNumberInput"] button {{
-        background: {theme_colors['surface_alt']} !important;
-        color: {theme_colors['main_text']} !important;
-        border-color: {theme_colors['border']} !important;
-    }}
-    [data-testid="stChatInput"], [data-testid="stChatInput"] > div {{
-        background: {theme_colors['surface_alt']} !important;
-        border-color: {theme_colors['border']} !important;
-    }}
-    [data-testid="stChatInput"] textarea {{ color: {theme_colors['main_text']} !important; }}
-    [data-testid="stBottom"], [data-testid="stBottom"] > div, [data-testid="stBottomBlockContainer"] {{
-        background: {theme_colors['main_bg']} !important;
-    }}
-    [data-testid="stChatMessage"] {{
-        background: {theme_colors['surface']} !important;
-        border: 1px solid {theme_colors['border']} !important;
-        border-radius: 10px !important;
-    }}
-    [data-testid="stChatMessage"] * {{ color: {theme_colors['main_text']} !important; }}
-    [data-testid="stTabs"] [data-baseweb="tab-list"] {{ background: transparent !important; border-bottom: 1px solid {theme_colors['border']} !important; }}
-    [data-testid="stTabs"] [data-baseweb="tab"] {{ background: transparent !important; }}
-    [data-testid="stTabs"] [data-baseweb="tab"] p, [data-testid="stTabs"] button[role="tab"] {{ color: {theme_colors['muted']} !important; }}
-    [data-testid="stTabs"] [aria-selected="true"] p, [data-testid="stTabs"] button[aria-selected="true"] {{ color: {theme_colors['main_text']} !important; font-weight: 600 !important; }}
-    [data-testid="stAlert"], [data-testid="stNotification"] {{ border: 1px solid {theme_colors['border']} !important; }}
-    [data-testid="stAlert"] *, [data-testid="stNotification"] * {{ color: {theme_colors['main_text']} !important; }}
-    [data-testid="stText"], [data-testid="stCode"], [data-testid="stCode"] pre, pre, code {{
-        background: {theme_colors['surface_alt']} !important;
-        color: {theme_colors['main_text']} !important;
-    }}
-    [data-testid="stExpander"] summary, [data-testid="stExpander"] summary *,
-    [data-testid="stExpander"] details {{ background: transparent !important; color: {theme_colors['main_text']} !important; }}
-    [data-testid="stFileUploaderDropzone"] button, [data-testid="stFileUploader"] small {{
-        background: {theme_colors['surface_alt']} !important;
-        color: {theme_colors['main_text']} !important;
-        border-color: {theme_colors['border']} !important;
-    }}
-    [data-testid="stFileUploaderFile"], [data-testid="stFileUploaderFileName"] {{ color: {theme_colors['main_text']} !important; }}
-    [data-testid="stDownloadButton"] button, [data-testid="stBaseButton-secondaryFormSubmit"] {{
-        background: {theme_colors['surface_alt']} !important;
-        color: {theme_colors['main_text']} !important;
-        border: 1px solid {theme_colors['border']} !important;
-    }}
-    .stButton > button p, [data-testid="stBaseButton-secondary"] p {{ color: {theme_colors['main_text']} !important; }}
-    [data-testid="stBaseButton-primary"] p {{ color: #FFFFFF !important; }}
-    [data-testid="stProgress"] > div > div {{ background-color: {theme_colors['surface_alt']} !important; }}
-    [data-testid="stSpinner"] *, [data-testid="stSidebar"] * {{ color: {theme_colors['main_text']} !important; }}
-    [data-testid="stSidebar"] [data-testid="stCaptionContainer"] * {{ color: {theme_colors['muted']} !important; }}
-    [data-testid="stHeading"] *, h1, h2, h3, h4, h5, h6 {{ color: {theme_colors['main_text']} !important; }}
-    [data-testid="stRadio"] [role="radiogroup"] * {{ color: {theme_colors['main_text']} !important; }}
-    [data-testid="stMarkdownContainer"] table, [data-testid="stMarkdownContainer"] th, [data-testid="stMarkdownContainer"] td {{
-        color: {theme_colors['main_text']} !important; border-color: {theme_colors['border']} !important;
-    }}
-    [data-testid="stMarkdownContainer"] th {{ background: {theme_colors['surface_alt']} !important; }}
-    [data-testid="stTooltipContent"], div[data-baseweb="tooltip"] > div {{
-        background: {theme_colors['surface']} !important; color: {theme_colors['main_text']} !important;
-    }}
-    @media (max-width: 700px) {{ 
-        .main-header {{ padding: 14px; }}
-        .main-header h1 {{ font-size: 1.3rem; }}
-    }}
-</style>
-""", unsafe_allow_html=True)
+STATIC_CSS = """
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@300;400;500;600;700&display=swap');
+html, body, [class*="css"], button, input, textarea { font-family: 'IBM Plex Sans Thai', sans-serif; }
+:root { color-scheme: var(--scheme); }
+html, body, .stApp, [data-testid="stApp"], [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+    background: var(--bg) !important; color: var(--text) !important;
+}
 
-# Top Bar: Main Title on Left + Dropdown for Theme Selection on Right
-col_top_header, col_top_theme = st.columns([3.8, 1.2], vertical_alignment="center")
+.block-container { max-width: 1480px; padding-top: 2.2rem; padding-bottom: 4rem; }
+
+/* ---- ซ่อนจุดสามจุด (Main Menu) และปุ่ม Deploy มุมขวาบน ---- */
+[data-testid="stToolbar"] button[kind="icon"],
+[data-testid="stMainMenu"],
+[data-testid="stMainMenuPopover"],
+[data-testid="stAppDeployButton"],
+#MainMenu {
+    display: none !important;
+    visibility: hidden
+}
+
+/* ---- native header / toolbar ---- */
+header[data-testid="stHeader"], .stAppHeader { background: var(--bg) !important; }
+header[data-testid="stHeader"] { overflow: hidden; }
+header[data-testid="stHeader"] button { background: transparent !important; border: none !important; }
+header[data-testid="stHeader"] button, header[data-testid="stHeader"] button * { color: var(--text) !important; }
+
+/* ---- hide Streamlit's running-man + Stop button, use our own animation ---- */
+[data-testid="stStatusWidget"], [data-testid="stToolbarActions"] { display: none !important; }
+@keyframes tdai-spin { to { transform: rotate(360deg); } }
+@keyframes tdai-sweep { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
+@keyframes tdai-pulse { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+.stApp[data-test-script-state="running"]::before {
+    content: "AI กำลังประมวลผล"; position: fixed; top: 10px; right: 64px; width: 176px; height: 34px; box-sizing: border-box;
+    padding: 0 14px 0 40px; display: flex; align-items: center; border-radius: 999px; font-size: 0.85rem; font-weight: 600;
+    color: var(--accent-text); background: var(--surface); border: 1px solid var(--border-strong); box-shadow: var(--shadow);
+    z-index: 1000001; animation: tdai-pulse 1.6s ease-in-out infinite; }
+.stApp[data-test-script-state="running"]::after {
+    content: ""; position: fixed; top: 18px; right: 206px; width: 16px; height: 16px; border-radius: 50%;
+    border: 3px solid var(--accent-soft); border-top-color: var(--accent); animation: tdai-spin .8s linear infinite; z-index: 1000002; }
+.stApp[data-test-script-state="running"] header[data-testid="stHeader"]::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3px;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent); animation: tdai-sweep 1.2s ease-in-out infinite; }
+
+/* ---- main menu (three dots) ---- */
+[data-testid="stMainMenuPopover"], [data-testid="stMainMenuPopover"] > div, [data-testid="stMainMenuList"] {
+    background: var(--surface) !important; border: 1px solid var(--border) !important; border-radius: 12px !important; }
+[data-testid="stMainMenuPopover"] *, [data-testid="stMainMenuList"] * { color: var(--text) !important; }
+[data-testid="stMainMenuList"] li, [data-testid="stMainMenuList"] [role="option"] { background: transparent !important; }
+[data-testid="stMainMenuList"] li:hover, [data-testid="stMainMenuList"] [role="option"]:hover { background: var(--accent-soft) !important; }
+[data-testid="stDecoration"] { display: none !important; }
+.stDeployButton, [data-testid="stAppDeployButton"], [data-testid="manage-app-button"] { display: none !important; }
+
+/* ---- typography ---- */
+h1, h2, h3, h4, h5, h6, [data-testid="stHeading"] *, [data-testid="stMarkdownContainer"] h1,
+[data-testid="stMarkdownContainer"] h2, [data-testid="stMarkdownContainer"] h3, [data-testid="stMarkdownContainer"] h4 { color: var(--text) !important; }
+[data-testid="stMarkdownContainer"], [data-testid="stMarkdownContainer"] p, [data-testid="stMarkdownContainer"] li,
+[data-testid="stWidgetLabel"] *, label, label * { color: var(--text) !important; }
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] * { color: var(--muted) !important; }
+a { color: var(--accent-text) !important; }
+hr { border-color: var(--border) !important; }
+h2 { font-size: 1.35rem !important; font-weight: 700 !important; }
+
+/* ---- sidebar ---- */
+[data-testid="stSidebar"], [data-testid="stSidebar"] > div:first-child { background: var(--sidebar) !important; border-right: 1px solid var(--border); }
+[data-testid="stSidebar"] *:not(svg):not(path) { color: var(--text) !important; }
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"] * { color: var(--muted) !important; }
+
+/* ---- hero ---- */
+.hero { background: var(--hero); border-radius: 16px; padding: 22px 26px; box-shadow: var(--shadow); }
+.hero h1 { color: #FFFFFF !important; font-size: 1.6rem; font-weight: 700; margin: 0 0 6px 0; padding: 0; }
+.hero p { color: rgba(255,255,255,0.88) !important; font-size: 0.97rem; margin: 0 0 14px 0; }
+.hero-steps { display: flex; flex-wrap: wrap; gap: 8px; }
+.hero-step { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 999px;
+    font-size: 0.82rem; font-weight: 600; background: rgba(255,255,255,0.16); color: #FFFFFF;
+    border: 1px solid rgba(255,255,255,0.28); }
+
+/* ---- cards / containers ---- */
+[data-testid="stVerticalBlockBorderWrapper"] { background: var(--surface) !important; border-color: var(--border) !important; border-radius: 14px !important; }
+[data-testid="stMetric"] { background: var(--surface) !important; border: 1px solid var(--border) !important; border-radius: 12px !important; padding: 12px 14px !important; box-shadow: var(--shadow); }
+[data-testid="stMetricLabel"] *, [data-testid="stMetricLabel"] p { color: var(--muted) !important; font-size: 0.86rem !important; }
+[data-testid="stMetricValue"], [data-testid="stMetricValue"] * { color: var(--text) !important; font-weight: 700 !important; }
+div[data-testid="stForm"] { background: var(--surface) !important; border: 1px solid var(--border) !important; border-radius: 14px !important; padding: 16px; }
+[data-testid="stExpander"], [data-testid="stExpander"] details { background: var(--surface) !important; border: 1px solid var(--border) !important; border-radius: 12px !important; }
+[data-testid="stExpander"] summary, [data-testid="stExpander"] summary * { background: transparent !important; color: var(--text) !important; }
+[data-testid="stExpander"] summary:hover { background: var(--accent-soft) !important; }
+
+/* ---- inputs ---- */
+[data-testid="stTextInput"] input, [data-testid="stNumberInput"] input, [data-testid="stTextArea"] textarea, textarea, input {
+    background: var(--surface-alt) !important; color: var(--text) !important; border-color: var(--border) !important;
+    -webkit-text-fill-color: var(--text) !important; caret-color: var(--text) !important; }
+[data-testid="stTextInput"] > div > div, [data-testid="stNumberInput"] > div > div, [data-testid="stTextArea"] > div > div,
+[data-testid="stTextInput"] [data-baseweb="input"], [data-testid="stNumberInput"] [data-baseweb="input"],
+[data-testid="stTextArea"] [data-baseweb="textarea"] { background: var(--surface-alt) !important; border-color: var(--border) !important; border-radius: 8px !important; }
+[data-testid="stNumberInput"] button { background: var(--surface-alt) !important; color: var(--text) !important; border-color: var(--border) !important; }
+::placeholder { color: var(--muted) !important; -webkit-text-fill-color: var(--muted) !important; opacity: 0.85; }
+
+/* ---- select box (document picker) ---- */
+[data-baseweb="select"] div { background-color: transparent !important; }
+[data-baseweb="select"] > div { background-color: var(--surface-alt) !important; border: 1px solid var(--border) !important; border-radius: 10px !important; }
+[data-baseweb="select"] *, [data-baseweb="select"] input { color: var(--text) !important; fill: var(--text) !important; -webkit-text-fill-color: var(--text) !important; }
+[data-baseweb="popover"], [data-baseweb="popover"] > div, [data-baseweb="popover"] ul, [data-baseweb="menu"], [data-testid="stSelectboxVirtualDropdown"] {
+    background: var(--surface) !important; border-radius: 10px !important; }
+[data-baseweb="popover"] *, [data-baseweb="menu"] * { color: var(--text) !important; }
+[data-baseweb="menu"] li, [data-testid="stSelectboxVirtualDropdown"] li { background: transparent !important; }
+[data-baseweb="menu"] li:hover, [data-baseweb="menu"] [aria-selected="true"], [data-testid="stSelectboxVirtualDropdown"] li:hover { background: var(--accent-soft) !important; }
+[data-baseweb="tooltip"] > div, [data-testid="stTooltipContent"] { background: var(--surface) !important; color: var(--text) !important; border: 1px solid var(--border); }
+
+/* ---- buttons ---- */
+.stButton > button, [data-testid="stBaseButton-secondary"], [data-testid="stBaseButton-minimal"],
+[data-testid="stDownloadButton"] button, [data-testid="stBaseButton-secondaryFormSubmit"] {
+    background: var(--surface) !important; color: var(--text) !important; border: 1px solid var(--border-strong) !important;
+    border-radius: 10px !important; font-weight: 500 !important; transition: all .15s ease; }
+.stButton > button:hover, [data-testid="stBaseButton-secondary"]:hover, [data-testid="stDownloadButton"] button:hover {
+    border-color: var(--accent) !important; background: var(--accent-soft) !important; color: var(--accent-text) !important; }
+.stButton > button *, [data-testid="stDownloadButton"] button * { color: inherit !important; }
+.stButton > button[kind="primary"], .stButton > button[data-testid="stBaseButton-primary"],
+[data-testid="stDownloadButton"] button[kind="primary"], button[data-testid="stBaseButton-primaryFormSubmit"] {
+    background: var(--primary-bg) !important; color: var(--primary-fg) !important; border: 1px solid var(--primary-bg) !important;
+    border-radius: 10px !important; font-weight: 600 !important; box-shadow: var(--shadow); }
+.stButton > button[kind="primary"] *, .stButton > button[data-testid="stBaseButton-primary"] *,
+[data-testid="stDownloadButton"] button[kind="primary"] *, button[data-testid="stBaseButton-primaryFormSubmit"] * { color: var(--primary-fg) !important; }
+.stButton > button[kind="primary"]:hover, .stButton > button[data-testid="stBaseButton-primary"]:hover,
+[data-testid="stDownloadButton"] button[kind="primary"]:hover {
+    background: var(--primary-bg) !important; color: var(--primary-fg) !important; filter: brightness(1.1); }
+
+/* ---- file uploader ---- */
+[data-testid="stFileUploader"] [data-testid^="stFile"] { background: var(--surface-alt) !important; }
+[data-testid="stFileUploaderDropzone"] { background: var(--surface-alt) !important; border: 2px dashed var(--border-strong) !important; border-radius: 14px !important; }
+[data-testid="stFileUploaderDropzone"] *, [data-testid="stFileUploader"] small, [data-testid="stFileUploader"] span { color: var(--text) !important; }
+[data-testid="stFileUploaderDropzone"] button { background: var(--surface) !important; border: 1px solid var(--border-strong) !important; border-radius: 8px !important; }
+[data-testid="stFileUploaderFile"], [data-testid="stFileChip"] { background: var(--surface-alt) !important; border: 1px solid var(--border) !important; border-radius: 10px !important; }
+[data-testid="stFileUploaderFile"] *, [data-testid="stFileChip"] * { color: var(--text) !important; }
+[data-testid="stFileUploaderFile"] svg, [data-testid="stFileUploaderDeleteBtn"] svg { fill: var(--text) !important; color: var(--text) !important; }
+[data-testid="stFileUploaderFileData"], [data-testid="stFileUploaderPagination"], [data-testid="stFileUploaderPagination"] * { background: transparent !important; }
+[data-testid="stFileUploader"] > section, [data-testid="stFileUploader"] section > div { background: transparent; }
+
+/* ---- tabs ---- */
+[data-baseweb="tabs"], [data-baseweb="tab-list"], [data-baseweb="tab-panel"] { background: transparent !important; }
+[data-baseweb="tab-list"]::before, [data-baseweb="tab-list"]::after { display: none !important; }
+[data-baseweb="tab-list"] button { background: transparent !important; }
+[data-baseweb="tab"] p, [data-baseweb="tab"] { color: var(--muted) !important; font-weight: 500; }
+[data-baseweb="tab"][aria-selected="true"] p, [data-baseweb="tab"][aria-selected="true"] { color: var(--accent-text) !important; font-weight: 700; }
+[data-baseweb="tab-highlight"] { background-color: var(--accent) !important; }
+[data-baseweb="tab-border"] { background-color: var(--border) !important; }
+
+/* ---- alerts ---- */
+[data-testid="stAlert"] { background: var(--info-bg) !important; border: 1px solid var(--info-bd) !important; border-left: 5px solid var(--info-bd) !important; border-radius: 12px !important; }
+[data-testid="stAlert"]:has([data-testid="stAlertContentSuccess"]) { background: var(--ok-bg) !important; border-color: var(--ok-bd) !important; }
+[data-testid="stAlert"]:has([data-testid="stAlertContentWarning"]) { background: var(--warn-bg) !important; border-color: var(--warn-bd) !important; }
+[data-testid="stAlert"]:has([data-testid="stAlertContentError"]) { background: var(--err-bg) !important; border-color: var(--err-bd) !important; }
+[data-testid="stAlert"] *, [data-testid="stNotification"] * { color: var(--text) !important; }
+
+/* ---- code / text ---- */
+[data-testid="stText"], [data-testid="stCode"], [data-testid="stCode"] pre, pre, code { background: var(--surface-alt) !important; color: var(--text) !important; border-radius: 8px; }
+[data-testid="stMarkdownContainer"] table, [data-testid="stMarkdownContainer"] th, [data-testid="stMarkdownContainer"] td { color: var(--text) !important; border-color: var(--border) !important; }
+[data-testid="stMarkdownContainer"] th { background: var(--surface-alt) !important; }
+
+/* ---- chat ---- */
+[data-testid="stChatMessage"] { background: var(--surface-alt) !important; border: 1px solid var(--border) !important; border-radius: 14px !important; }
+[data-testid="stChatMessage"] * { color: var(--text) !important; }
+[data-testid="stBottom"], [data-testid="stBottom"] > div, [data-testid="stBottomBlockContainer"] { background: var(--bg) !important; }
+[data-testid="stChatInput"], [data-testid="stChatInput"] > div, [data-testid="stChatInput"] [data-baseweb="textarea"] { background: var(--surface-alt) !important; border-color: var(--border-strong) !important; border-radius: 12px !important; }
+[data-testid="stChatInput"] textarea { color: var(--text) !important; -webkit-text-fill-color: var(--text) !important; }
+
+/* ---- misc ---- */
+[data-testid="stDataFrame"], [data-testid="stDataEditor"] { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+[data-testid="stRadio"] [role="radiogroup"] * { color: var(--text) !important; }
+[data-testid="stSpinner"] * { color: var(--text) !important; }
+[data-testid="stProgress"] p { color: var(--muted) !important; }
+[data-testid="stProgressBarTrack"] { background-color: var(--surface-alt) !important; border: 1px solid var(--border); }
+[data-testid="stProgressBarTrack"] > div { background-color: var(--accent) !important; }
+[data-testid="stToggle"] p, [data-testid="stCheckbox"] p { color: var(--text) !important; }
+[data-testid="stAudio"] audio { width: 100%; }
+
+@media (max-width: 700px) { .hero { padding: 16px; } .hero h1 { font-size: 1.25rem; } }
+"""
+
+st.markdown(f"<style>{css_vars}{STATIC_CSS}[data-testid='stDataFrame'], [data-testid='stDataEditor'] {{ {grid_filter} }}</style>", unsafe_allow_html=True)
+
+# ---- top bar: title + theme switch ----
+col_top_header, col_top_theme = st.columns([4.2, 1], vertical_alignment="center")
 
 with col_top_header:
     st.markdown("""
-    <div class="main-header">
+    <div class="hero">
         <h1>📑 ThaiDocAI · ตรวจเอกสารและยอดชำระอัจฉริยะ</h1>
-        <p>อ่านใบเสร็จและสลิป ตรวจทานตัวเลข ตรวจสมการยอด และส่งออกข้อมูลสำหรับทำบัญชี (รองรับประมวลผลเป็นชุด)</p>
-        <div class="workflow-hint">
-            <span class="workflow-badge-step">1 · อัปโหลดภาพ (เดี่ยว / หลายภาพ)</span>
-            <span class="workflow-badge-step">2 · ตรวจและแก้ข้อมูล</span>
-            <span class="workflow-badge-step">3 · ยืนยันและส่งออกชุดข้อมูล</span>
+        <p>อ่านใบเสร็จและสลิป ตรวจทานตัวเลข ถาม-ตอบทั้งชุด และส่งออกข้อมูลสำหรับทำบัญชี</p>
+        <div class="hero-steps">
+            <span class="hero-step">① อัปโหลดภาพ</span>
+            <span class="hero-step">② ตรวจและแก้ข้อมูล</span>
+            <span class="hero-step">③ ยืนยันและส่งออก</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
 
 with col_top_theme:
     with st.container(border=True):
-        st.markdown("**🎨 โหมดธีมหน้าจอ (Theme)**")
-        theme_choices = ["🌙 กลางคืน", "☀️ สว่าง"]
-        active_idx = 0 if "กลางคืน" in st.session_state.theme_mode else 1
-        selected_theme = st.selectbox(
-            "ธีมหน้าจอ",
-            theme_choices,
-            index=active_idx,
-            key="top_bar_theme_selector",
-            label_visibility="collapsed",
-            help="สลับระหว่างโหมดมืด (Dark Mode) และโหมดสว่าง (Light Mode)",
-        )
-        if selected_theme != st.session_state.theme_mode:
-            st.session_state.theme_mode = selected_theme
+        dark_on = st.toggle("🌙 โหมดมืด", value=is_dark_mode, key="theme_toggle")
+        new_mode = "🌙 กลางคืน" if dark_on else "☀️ สว่าง"
+        if new_mode != st.session_state.theme_mode:
+            st.session_state.theme_mode = new_mode
             st.rerun()
 
 # ==================== Session State Management ====================
@@ -420,9 +343,7 @@ col_upload, col_display = st.columns([1, 1.25], gap="large")
 
 with col_upload:
     st.subheader("1 · เพิ่มเอกสาร")
-    st.caption("📁 **ระบบรองรับการอัปโหลดหลายภาพพร้อมกัน (Batch Multi-Upload)** · รองรับ JPG/PNG")
-    st.caption("⚡ **ประมวลผลแบบขนาน**: ระบบย่อขนาดภาพและส่งประมวลผลพร้อมกันหลายภาพอัตโนมัติ (สลิปโอนเงินจะใช้เวลานานกว่าใบเสร็จเล็กน้อย)")
-    st.caption("ความเป็นส่วนตัว: ภาพจะถูกส่งไปประมวลผลผ่าน ThaiLLM API · แอปไม่เก็บประวัติถาวร ให้ดาวน์โหลด JSON/CSV หลังยืนยัน")
+    st.caption("📁 อัปโหลดได้หลายภาพพร้อมกัน (JPG/PNG) · ประมวลผลแบบขนาน · ภาพถูกส่งไปประมวลผลผ่าน ThaiLLM API และแอปไม่เก็บประวัติถาวร")
 
     uploaded_files = st.file_uploader(
         "เลือกหรือลากวางรูปใบเสร็จ/สลิป (เลือกได้หลายภาพพร้อมกัน)",
@@ -501,6 +422,9 @@ with col_upload:
         i for i, r in enumerate(st.session_state.scan_results)
         if not r.get("success") and i in _sources
     ]
+    _notice = st.session_state.pop("retry_notice", None)
+    if _notice:
+        st.info(_notice)
     if _failed_idx:
         st.error(f"❌ ประมวลผลไม่สำเร็จ {len(_failed_idx)} ภาพ")
         with st.expander("ดูรายการที่ล้มเหลวและสาเหตุ", expanded=False):
@@ -521,9 +445,14 @@ with col_upload:
 
             with st.spinner(f"กำลังประมวลผลซ้ำ {len(retry_inputs)} ภาพ..."):
                 retry_results = api_service.extract_documents_batch(
-                    retry_inputs, max_workers=3, progress_callback=_on_retry_progress
+                    retry_inputs, max_workers=2, progress_callback=_on_retry_progress, rescue=True
                 )
             retry_bar.empty()
+            recovered = sum(1 for r in retry_results if r.get("success"))
+            st.session_state.retry_notice = (
+                f"ประมวลผลซ้ำแล้ว: สำเร็จ {recovered}/{len(retry_results)} ภาพ"
+                + ("" if recovered == len(retry_results) else " · ที่เหลือดูสาเหตุได้ในรายการที่ล้มเหลวด้านล่าง")
+            )
             for i, new_result in zip(_failed_idx, retry_results):
                 new_result["sentiment_result"] = None
                 new_result["verified"] = False
@@ -691,10 +620,10 @@ with col_display:
         
         # แท็บแสดงผล 4 รูปแบบ
         tab1, tab2, tab3, tab4 = st.tabs([
-            "📄 ตรวจเอกสารและส่งออก",
-            "🧠 วิเคราะห์ธุรกิจ & ภาษี AI",
-            "💬 ถาม-ตอบเอกสารอัจฉริยะ",
-            "⚙️ ตรวจสอบยอด & ตัวช่วยเสริม"
+            "📄 ตรวจ/ส่งออก",
+            "🧠 วิเคราะห์ AI",
+            "💬 ถาม-ตอบ",
+            "⚙️ ตรวจยอด"
         ])
         
         # ------------------ Tab 1: ตารางและ Metric ------------------
@@ -1037,61 +966,87 @@ with col_display:
         # ------------------ Tab 3: ถาม-ตอบอัจฉริยะ (Chat Q&A) ------------------
         with tab3:
             st.markdown("#### ถามข้อมูลจากเอกสาร (Smart Document Q&A)")
-            st.caption(f"ใช้โมเดล {selected_model_name} · ปัญญาประดิษฐ์สกัดและตอบคำถามจากข้อมูลจริงในเอกสาร")
-            
-            # Format comprehensive Thai document context
-            context_to_send = api_service.format_document_context_for_qa(doc_data, raw_content)
-            
+            ok_results = [r for r in all_results if r.get("success")]
+            scope_all = False
+            if len(ok_results) > 1:
+                scope_choice = st.radio(
+                    "ขอบเขตการถาม",
+                    ["📚 ทั้งชุดทุกฉบับ", "📄 เฉพาะฉบับที่เลือก"],
+                    horizontal=True,
+                    key="qa_scope",
+                )
+                scope_all = scope_choice.startswith("📚")
+                if st.session_state.get("_qa_scope_prev") != scope_choice:
+                    st.session_state._qa_scope_prev = scope_choice
+                    st.session_state.chat_history = []
+            if scope_all:
+                st.caption(f"AI จะตอบจากข้อมูล {len(ok_results)} ฉบับพร้อมกัน · ยอดรวมและสถิติคำนวณโดยระบบ ไม่ใช่ให้ AI บวกเอง")
+                context_to_send = api_service.format_batch_context_for_qa(all_results)
+            else:
+                st.caption(f"ใช้โมเดล {selected_model_name} · ตอบจากข้อมูลจริงในเอกสารที่เลือก")
+                context_to_send = api_service.format_document_context_for_qa(doc_data, raw_content)
+
             def submit_question(q_text):
                 st.session_state.chat_history.append({"role": "user", "content": q_text})
                 with st.spinner("🤖 AI กำลังค้นหาคำตอบจากเอกสาร..."):
-                    ans_obj = api_service.ask_document_qa(context_to_send, q_text, selected_model_id)
+                    ans_obj = api_service.ask_document_qa(
+                        context_to_send, q_text, selected_model_id,
+                        max_tokens=1200 if scope_all else 800,
+                        timeout=60 if scope_all else 35,
+                    )
                     reply = ans_obj.get("answer") if ans_obj.get("success") else f"❌ {ans_obj.get('error')}"
                     st.session_state.chat_history.append({
-                        "role": "assistant", 
-                        "content": reply, 
-                        "time": ans_obj.get("elapsed_time")
+                        "role": "assistant",
+                        "content": reply,
+                        "time": ans_obj.get("elapsed_time"),
                     })
                 st.rerun()
 
-            st.markdown("**💡 คำถามด่วน:**")
-            is_slip = (doc_data and doc_data.get("transfer_amount") is not None)
-            
-            if is_slip:
-                qc1, qc2, qc3, qc4 = st.columns(4)
-                if qc1.button("💸 สรุปยอดโอนและค่าธรรมเนียม", width="stretch"):
-                    submit_question("สรุปยอดเงินโอน ค่าธรรมเนียม และยอดหักบัญชีทั้งหมดของสลิปนี้")
-                if qc2.button("👤 ผู้โอนและผู้รับเงิน", width="stretch"):
-                    submit_question("ใครเป็นผู้โอนเงิน และโอนเงินไปยังใคร?")
-                if qc3.button("🧾 วันที่ เวลา และเลขอ้างอิง", width="stretch"):
-                    submit_question("ทำรายการเมื่อวันที่และเวลาใด และมีรหัสอ้างอิงหรือเลขที่ทำรายการอะไรบ้าง?")
-                if qc4.button("🏷️ หมวดหมู่บัญชีและสิทธิ์เบิก", width="stretch"):
-                    submit_question("รายการนี้ควรลงบัญชีหมวดไหน และใช้เบิกบริษัทได้หรือไม่?")
+            is_slip = bool(doc_data and doc_data.get("transfer_amount") is not None)
+            if scope_all:
+                quick_questions = [
+                    ("💰 ยอดรวมทั้งหมด", "สรุปยอดรวมทั้งหมดของทุกเอกสาร จำนวนฉบับ และค่าเฉลี่ยต่อฉบับ"),
+                    ("🏆 สูงสุด / ต่ำสุด", "เอกสารฉบับไหนมียอดสูงที่สุดและต่ำที่สุด ระบุชื่อไฟล์ ผู้รับ และวันที่"),
+                    ("👥 ยอดแยกตามผู้รับ", "สรุปยอดรวมแยกตามผู้รับเงินหรือร้านค้า เรียงจากมากไปน้อย"),
+                    ("📅 ยอดแยกตามวัน", "สรุปยอดรวมแยกตามวันที่ และบอกวันที่มียอดสูงที่สุด"),
+                ]
+            elif is_slip:
+                quick_questions = [
+                    ("💸 ยอดโอนและค่าธรรมเนียม", "สรุปยอดเงินโอน ค่าธรรมเนียม และยอดหักบัญชีทั้งหมดของสลิปนี้"),
+                    ("👤 ผู้โอนและผู้รับ", "ใครเป็นผู้โอนเงิน และโอนเงินไปยังใคร?"),
+                    ("🧾 วันที่และเลขอ้างอิง", "ทำรายการเมื่อวันที่และเวลาใด และมีรหัสอ้างอิงหรือเลขที่ทำรายการอะไรบ้าง?"),
+                    ("🏷️ หมวดบัญชีและสิทธิ์เบิก", "รายการนี้ควรลงบัญชีหมวดไหน และใช้เบิกบริษัทได้หรือไม่?"),
+                ]
             else:
-                qc1, qc2, qc3, qc4 = st.columns(4)
-                if qc1.button("📦 สรุปรายการสินค้าและราคา", width="stretch"):
-                    submit_question("ในเอกสารนี้มีรายการสินค้าหรือบริการอะไรบ้าง แต่ละรายการราคาเท่าไหร่?")
-                if qc2.button("💰 สรุปยอดเงินและภาษี VAT", width="stretch"):
-                    submit_question("สรุปยอดรวม ยอดก่อนภาษี ภาษีมูลค่าเพิ่ม (VAT) และส่วนลดของเอกสารนี้")
-                if qc3.button("🏆 สินค้าราคาสูงสุดและต่ำสุด", width="stretch"):
-                    submit_question("สินค้าชิ้นไหนราคาสูงที่สุด และชิ้นไหนราคาต่ำที่สุด คิดเป็นกี่บาท?")
-                if qc4.button("🏢 ร้านค้าและข้อมูลผู้ขาย", width="stretch"):
-                    submit_question("เอกสารนี้ออกจากร้านค้าใด มีเลขที่ใบเสร็จ หรือข้อมูลที่อยู่/สาขาอะไรบ้าง?")
+                quick_questions = [
+                    ("📦 รายการสินค้าและราคา", "ในเอกสารนี้มีรายการสินค้าหรือบริการอะไรบ้าง แต่ละรายการราคาเท่าไหร่?"),
+                    ("💰 ยอดเงินและ VAT", "สรุปยอดรวม ยอดก่อนภาษี ภาษีมูลค่าเพิ่ม (VAT) และส่วนลดของเอกสารนี้"),
+                    ("🏆 สินค้าแพงสุด/ถูกสุด", "สินค้าชิ้นไหนราคาสูงที่สุด และชิ้นไหนราคาต่ำที่สุด คิดเป็นกี่บาท?"),
+                    ("🏢 ร้านค้าและผู้ขาย", "เอกสารนี้ออกจากร้านค้าใด มีเลขที่ใบเสร็จ หรือข้อมูลที่อยู่/สาขาอะไรบ้าง?"),
+                ]
+
+            st.markdown("**💡 คำถามด่วน**")
+            quick_cols = st.columns(len(quick_questions))
+            for q_col, (q_label, q_text) in zip(quick_cols, quick_questions):
+                if q_col.button(q_label, width="stretch", key=f"qa_quick_{int(scope_all)}_{q_label}"):
+                    submit_question(q_text)
 
             st.divider()
-            
-            # หน้าต่างแชต
+
             chat_box = st.container(height=380)
             with chat_box:
                 if len(st.session_state.chat_history) == 0:
-                    st.caption("ยังไม่มีบทสนทนา สามารถกดปุ่มคำถามด่วนด้านบนหรือพิมพ์ถามคำถามใดๆ จากเอกสารได้เลยครับ")
+                    st.caption("ยังไม่มีบทสนทนา กดคำถามด่วนด้านบนหรือพิมพ์คำถามได้เลยครับ")
                 for msg in st.session_state.chat_history:
                     with st.chat_message(msg["role"]):
                         st.markdown(msg["content"])
                         if "time" in msg and msg["time"]:
                             st.caption(f"⏱️ ตอบโดย AI ใน {msg['time']} วินาที")
 
-            user_query = st.chat_input("พิมพ์คำถามเกี่ยวกับเอกสาร เช่น 'ซื้ออะไรไปบ้าง?' หรือ 'คิดเป็นเงินกี่บาท?'")
+            user_query = st.chat_input(
+                "พิมพ์คำถามเกี่ยวกับทุกสลิป เช่น 'ใครได้รับเงินมากที่สุด?'" if scope_all
+                else "พิมพ์คำถามเกี่ยวกับเอกสาร เช่น 'ซื้ออะไรไปบ้าง?' หรือ 'คิดเป็นเงินกี่บาท?'"
+            )
             if user_query:
                 submit_question(user_query)
 

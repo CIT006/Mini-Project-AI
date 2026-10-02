@@ -506,3 +506,51 @@ class BusinessIntelligenceAndQATests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class RetryAndBatchContextTests(unittest.TestCase):
+    def test_retries_change_the_request_instead_of_repeating_it(self):
+        seen = []
+
+        def fake_once(mime, data, url, headers, schema, payload, timeout=40):
+            seen.append((payload["temperature"], "raw_ocr" in payload["messages"][1]["content"][0]["text"], timeout))
+            if len(seen) < 3:
+                return {"success": False, "error": "schema", "retryable": True}
+            return {"success": True, "data": {"items": []}, "raw_content": "", "elapsed_time": 0.1}
+
+        with patch.object(api_service, "THAILLM_APIKEY", "k"), patch.object(
+            api_service, "TYPHOON_OCR_APIKEY", ""
+        ), patch.object(api_service, "_extract_document_intelligence_once", fake_once), patch.object(
+            api_service.time, "sleep", lambda *_: None
+        ):
+            result = api_service.extract_document_intelligence(b"img")
+        self.assertTrue(result["success"])
+        self.assertEqual(seen[0][0], 0)
+        self.assertGreater(seen[1][0], 0)
+        self.assertTrue(seen[0][1])
+        self.assertFalse(seen[1][1])
+
+    def test_rescue_mode_starts_with_the_changed_request(self):
+        seen = []
+
+        def fake_once(mime, data, url, headers, schema, payload, timeout=40):
+            seen.append(payload["temperature"])
+            return {"success": True, "data": {"items": []}, "raw_content": "", "elapsed_time": 0.1}
+
+        with patch.object(api_service, "THAILLM_APIKEY", "k"), patch.object(
+            api_service, "TYPHOON_OCR_APIKEY", ""
+        ), patch.object(api_service, "_extract_document_intelligence_once", fake_once), patch.object(
+            api_service.time, "sleep", lambda *_: None
+        ):
+            api_service.extract_document_intelligence(b"img", rescue=True)
+        self.assertGreater(seen[0], 0)
+
+    def test_batch_context_has_system_computed_totals(self):
+        results = [
+            {"success": True, "file_name": "a.jpg", "data": {"transfer_amount": 100, "store_name": "ร้าน X", "payer_name": "ก", "date": "2026-09-22"}},
+            {"success": True, "file_name": "b.jpg", "data": {"transfer_amount": 250.5, "store_name": "ร้าน X", "payer_name": "ก", "date": "2026-09-23", "fee": 2}},
+            {"success": False, "file_name": "c.jpg", "error": "x"},
+        ]
+        text = api_service.format_batch_context_for_qa(results)
+        self.assertIn("350.50 บาท", text)
+        self.assertIn("ร้าน X = 350.50", text)
+        self.assertIn("อ่านไม่สำเร็จ 1 ฉบับ", text)

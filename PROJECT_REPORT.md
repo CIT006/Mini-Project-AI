@@ -4,10 +4,10 @@
 ---
 
 ## 👨‍💻 ข้อมูลผู้พัฒนา & สถาบัน
-* **ผู้จัดทำ:** IT67 Information
+* **ผู้จัดทำ:** Tanyaboon Pongpachcharapohn
 * **รหัสนักศึกษา / อีเมล:** 671413006@crru.ac.th
 * **สาขาวิชา/องค์กร:** มหาวิทยาลัยราชภัฏเชียงราย
-* **อาจารย์ผู้สอน/วิชา:** CIT0013 Machine Learning
+* **อาจารย์ผู้สอน/วิชา:** Anusorn Chaikaew CIT0013 Machine Learning
 
 ---
 

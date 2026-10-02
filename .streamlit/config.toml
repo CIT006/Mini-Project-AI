@@ -1,10 +1,9 @@
 [theme]
-base = "dark"
-primaryColor = "#245647"
-backgroundColor = "#111815"
-secondaryBackgroundColor = "#18221E"
-textColor = "#E6ECE7"
+# Use the light base so native widgets are light for everyone (regardless of the OS theme);
+# app.py overrides the colours when the in-app dark mode is switched on.
+base = "light"
+primaryColor = "#0F766E"
 font = "sans serif"
 
-[client]
-toolbarMode = "minimal"
+[browser]
+gatherUsageStats = false

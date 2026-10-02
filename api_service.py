@@ -1,4 +1,5 @@
 import base64
+import copy
 import datetime as _dt
 import io
 import json
@@ -184,10 +185,10 @@ def optimize_image_for_ocr(image_bytes, max_dim=1500, quality=92):
         return image_bytes, "image/jpeg"
 
 
-def _extract_document_intelligence_once(optimized_mime, image_data, url, headers, output_schema, payload):
+def _extract_document_intelligence_once(optimized_mime, image_data, url, headers, output_schema, payload, timeout=40):
     started = time.perf_counter()
     try:
-        response = _http_session.post(url, headers=headers, json=payload, timeout=40)
+        response = _http_session.post(url, headers=headers, json=payload, timeout=timeout)
         elapsed = round(time.perf_counter() - started, 2)
         if response.status_code != 200:
             result = {"success": False, "error": f"Vision API HTTP {response.status_code}", "elapsed_time": elapsed}
@@ -576,7 +577,7 @@ def _refine_person_names(optimized_mime, image_data, url, headers):
     return names
 
 
-def extract_document_intelligence(image_bytes, mime_type="image/jpeg", max_attempts=3):
+def extract_document_intelligence(image_bytes, mime_type="image/jpeg", max_attempts=3, rescue=False):
     if not THAILLM_APIKEY:
         return {
             "success": False,
@@ -665,22 +666,51 @@ def extract_document_intelligence(image_bytes, mime_type="image/jpeg", max_attem
     try:
         return _extract_with_retries(
             image_bytes, optimized_mime, image_data, url, headers, output_schema,
-            payload, max_attempts, typhoon_future,
+            payload, max_attempts, typhoon_future, rescue,
         )
     finally:
         if typhoon_pool is not None:
             typhoon_pool.shutdown(wait=False)
 
 
+def _lean_payload(payload, output_schema, level):
+    """Variant of the request used for retries.
+
+    The first request runs at temperature 0, so repeating it unchanged returns the same
+    broken answer every time. Retries therefore (a) add a little temperature, (b) drop the
+    long "raw_ocr" field that most often gets truncated or turns into commentary, and
+    (c) allow a longer answer.
+    """
+    variant = copy.deepcopy(payload)
+    full_schema = json.dumps(output_schema, ensure_ascii=False)
+    lean_schema = json.dumps({"data": output_schema["data"]}, ensure_ascii=False)
+    for message in variant.get("messages", []):
+        if isinstance(message.get("content"), list):
+            for part in message["content"]:
+                if part.get("type") == "text":
+                    part["text"] = part["text"].replace(full_schema, lean_schema)
+    variant["temperature"] = min(0.1 + 0.15 * level, 0.5)
+    variant["max_tokens"] = 3500
+    return variant
+
+
 def _extract_with_retries(image_bytes, optimized_mime, image_data, url, headers,
-                          output_schema, payload, max_attempts, typhoon_future):
+                          output_schema, payload, max_attempts, typhoon_future, rescue=False):
     last_result = None
     for attempt in range(max_attempts):
-        if attempt > 0:
+        level = attempt + (1 if rescue else 0)
+        if level > 0:
             # Back off before retrying so a busy/rate-limited API has time to recover.
-            time.sleep(min(2.0 * attempt, 6.0))
+            wait = min(2.0 * level, 6.0)
+            if last_result and "429" in str(last_result.get("error", "")):
+                wait = 10.0
+            time.sleep(wait)
+        if level == 0:
+            use_payload, use_timeout = payload, 40
+        else:
+            use_payload, use_timeout = _lean_payload(payload, output_schema, level), 75
         result = _extract_document_intelligence_once(
-            optimized_mime, image_data, url, headers, output_schema, payload
+            optimized_mime, image_data, url, headers, output_schema, use_payload, timeout=use_timeout
         )
         if result.get("success"):
             result.pop("retryable", None)
@@ -693,6 +723,8 @@ def _extract_with_retries(image_bytes, optimized_mime, image_data, url, headers,
                     typhoon_text, typhoon_status = _typhoon_ocr_request(image_bytes)
                 if typhoon_text:
                     apply_ocr_crosscheck(data, typhoon_text)
+                    if not result.get("raw_content"):
+                        result["raw_content"] = typhoon_text
                 typhoon_names = names_from_ocr_text(typhoon_text)
                 if typhoon_names:
                     data.update(typhoon_names)
@@ -715,7 +747,7 @@ def _extract_with_retries(image_bytes, optimized_mime, image_data, url, headers,
     return last_result
 
 
-def extract_documents_batch(documents, max_workers=6, progress_callback=None):
+def extract_documents_batch(documents, max_workers=6, progress_callback=None, rescue=False):
     """Process (file_name, bytes, mime) tuples in parallel; results keep input order.
 
     progress_callback(done, total) is called from the calling thread as each file finishes.
@@ -727,7 +759,9 @@ def extract_documents_batch(documents, max_workers=6, progress_callback=None):
     results = [None] * len(documents)
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         future_to_index = {
-            executor.submit(extract_document_intelligence, image_bytes, mime_type): index
+            executor.submit(
+                extract_document_intelligence, image_bytes, mime_type, 4 if rescue else 3, rescue
+            ): index
             for index, (_, image_bytes, mime_type) in enumerate(documents)
         }
         done = 0
@@ -843,7 +877,103 @@ def format_document_context_for_qa(doc_data, raw_content=""):
     return full_context.strip()
 
 
-def ask_document_qa(doc_context, user_question, model_id=PRIMARY_MODEL_ID):
+def _qa_to_float(value):
+    if value is None:
+        return None
+    try:
+        return float(str(value).replace(",", "").replace("บาท", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def format_batch_context_for_qa(results, max_rows=60):
+    """One compact context for asking questions across a whole batch of documents.
+
+    Totals and group-bys are computed here in Python so the LLM does not have to add up
+    dozens of numbers itself (small models get that wrong).
+    """
+    ok = [(i, r) for i, r in enumerate(results, start=1) if r.get("success") and isinstance(r.get("data"), dict)]
+    failed = [(i, r) for i, r in enumerate(results, start=1) if not r.get("success")]
+    head = f"ชุดเอกสารทั้งหมด {len(results)} ฉบับ อ่านสำเร็จ {len(ok)} ฉบับ"
+    if failed:
+        head += f" (อ่านไม่สำเร็จ {len(failed)} ฉบับ: ไม่รวมในตัวเลขด้านล่าง)"
+    lines = [head]
+
+    rows = []
+    by_receiver, by_payer, by_date = {}, {}, {}
+    total_fee = 0.0
+    for i, r in ok:
+        d = r["data"]
+        is_slip = d.get("transfer_amount") is not None
+        amount = _qa_to_float(d.get("transfer_amount") if is_slip else d.get("total"))
+        fee = _qa_to_float(d.get("fee"))
+        if fee:
+            total_fee += fee
+        doc_type = d.get("document_type") or ("สลิปโอนเงิน" if is_slip else "ใบเสร็จ")
+        receiver = (d.get("store_name") or "ไม่ระบุ").strip()
+        payer = (d.get("payer_name") or "").strip()
+        date = d.get("date") or "ไม่ระบุ"
+        rows.append({"i": i, "file": r.get("file_name", f"ภาพที่ {i}"), "type": doc_type, "date": date,
+                     "time": d.get("time") or "", "payer": payer, "receiver": receiver,
+                     "amount": amount, "fee": fee, "ref": d.get("receipt_no") or "", "items": d.get("items") or []})
+        if amount is not None:
+            for bucket, key in ((by_receiver, receiver), (by_payer, payer), (by_date, date)):
+                if key:
+                    total, count = bucket.get(key, (0.0, 0))
+                    bucket[key] = (total + amount, count + 1)
+
+    amounts = [row["amount"] for row in rows if row["amount"] is not None]
+    if amounts:
+        top = max((row for row in rows if row["amount"] is not None), key=lambda row: row["amount"])
+        low = min((row for row in rows if row["amount"] is not None), key=lambda row: row["amount"])
+        lines.append(
+            "สถิติรวม (คำนวณโดยระบบ ให้ใช้ตัวเลขนี้เป็นหลัก ห้ามบวกเองใหม่): "
+            f"ยอดรวม {sum(amounts):,.2f} บาท จาก {len(amounts)} ฉบับ เฉลี่ย {sum(amounts) / len(amounts):,.2f} บาท/ฉบับ; "
+            f"สูงสุด {top['amount']:,.2f} บาท (#{top['i']} {top['file']}); "
+            f"ต่ำสุด {low['amount']:,.2f} บาท (#{low['i']} {low['file']}); "
+            f"ค่าธรรมเนียมรวม {total_fee:,.2f} บาท"
+        )
+
+    def _group_line(title, bucket, limit=15):
+        if not bucket:
+            return None
+        ordered = sorted(bucket.items(), key=lambda kv: kv[1][0], reverse=True)[:limit]
+        return title + ": " + "; ".join(f"{name} = {total:,.2f} บาท ({count} ฉบับ)" for name, (total, count) in ordered)
+
+    for line in (
+        _group_line("ยอดรวมแยกตามผู้รับเงิน/ร้านค้า", by_receiver),
+        _group_line("ยอดรวมแยกตามผู้โอน/ผู้จ่าย", by_payer),
+        _group_line("ยอดรวมแยกตามวันที่", dict(sorted(by_date.items())), limit=40),
+    ):
+        if line:
+            lines.append(line)
+
+    lines.append("รายการเอกสารทั้งหมด:")
+    for row in rows[:max_rows]:
+        parts = [f"#{row['i']}", row["file"], row["type"], f"{row['date']} {row['time']}".strip()]
+        if row["payer"]:
+            parts.append(f"ผู้โอน/ผู้จ่าย: {row['payer']}")
+        parts.append(f"ผู้รับ/ร้าน: {row['receiver']}")
+        parts.append(f"ยอด: {row['amount']:,.2f}" if row["amount"] is not None else "ยอด: อ่านไม่ได้")
+        if row["fee"]:
+            parts.append(f"ค่าธรรมเนียม: {row['fee']:,.2f}")
+        if row["ref"]:
+            parts.append(f"เลขอ้างอิง: {row['ref']}")
+        item_texts = []
+        for item in row["items"][:5]:
+            if isinstance(item, dict) and item.get("name"):
+                item_texts.append(f"{item.get('name')} x{item.get('quantity') or 1} = {item.get('line_total') if item.get('line_total') is not None else '?'}")
+        if item_texts:
+            parts.append("สินค้า: " + ", ".join(item_texts))
+        lines.append(" | ".join(parts))
+    if len(rows) > max_rows:
+        lines.append(f"(แสดง {max_rows} จาก {len(rows)} ฉบับ แต่สถิติรวมด้านบนครอบคลุมทุกฉบับ)")
+    for i, r in failed:
+        lines.append(f"#{i} {r.get('file_name', '')}: อ่านไม่สำเร็จ")
+    return "\n".join(lines)
+
+
+def ask_document_qa(doc_context, user_question, model_id=PRIMARY_MODEL_ID, max_tokens=800, timeout=35):
     if not THAILLM_APIKEY:
         return {"success": False, "error": "ยังไม่ได้ตั้งค่า THAILLM_APIKEY ใน .streamlit/secrets.toml"}
 
@@ -864,12 +994,12 @@ def ask_document_qa(doc_context, user_question, model_id=PRIMARY_MODEL_ID):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"ข้อมูลเอกสาร:\n{doc_context}\n\nคำถาม: {user_question}"},
         ],
-        "max_tokens": 800,
+        "max_tokens": max_tokens,
         "temperature": 0.2,
     }
     started = time.perf_counter()
     try:
-        response = _http_session.post(url, headers=headers, json=payload, timeout=35)
+        response = _http_session.post(url, headers=headers, json=payload, timeout=timeout)
         elapsed = round(time.perf_counter() - started, 2)
         if response.status_code == 200:
             answer = clean_llm_response(response.json()["choices"][0]["message"]["content"])
