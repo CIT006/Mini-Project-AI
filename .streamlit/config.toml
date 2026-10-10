@@ -5,5 +5,10 @@ base = "light"
 primaryColor = "#0F766E"
 font = "sans serif"
 
+[theme.sidebar]
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F0F4F8"
+textColor = "#0F172A"
+
 [browser]
 gatherUsageStats = false

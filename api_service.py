@@ -1,8 +1,11 @@
 import base64
 import copy
 import datetime as _dt
+import difflib
+import hashlib
 import io
 import json
+import logging
 import os
 import re
 import threading
@@ -50,6 +53,12 @@ AVAILABLE_MODELS = {
 }
 PRIMARY_MODEL_NAME = "Typhoon-S 8B"
 PRIMARY_MODEL_ID = AVAILABLE_MODELS[PRIMARY_MODEL_NAME]
+
+# One prepared image is shared by the vision model and Typhoon OCR. 1800px on the long side keeps small Thai
+# diacritics legible on tall phone screenshots (the old 1500px cap shrank a 1080x2400 screenshot to 675px wide).
+OCR_MAX_DIM = 1800
+NAME_NEAR_THRESHOLD = 0.8
+_timing_log = logging.getLogger("thaidocai.timing")  # stage timings only; never keys or document content
 
 
 def clean_llm_response(text):
@@ -162,10 +171,10 @@ def summarize_document_data(data):
 
 def optimize_image_for_ocr(image_bytes, max_dim=1500, quality=92):
     """
-    Optimizes and downscales images in-memory to guarantee sub-3-second OCR processing.
+    Optimizes and downscales images in-memory to reduce upload size and OCR latency.
     Downscales large phone camera images (3-10MB) to a resolution that keeps small text
-    (e.g. names, item names) legible, while still greatly reducing network upload
-    payload and Vision model inference latency.
+    (e.g. names, item names) legible. Actual processing time still depends on provider
+    inference and network response time.
     """
     try:
         from PIL import Image, ImageOps
@@ -183,6 +192,22 @@ def optimize_image_for_ocr(image_bytes, max_dim=1500, quality=92):
         return out.getvalue(), "image/jpeg"
     except Exception:
         return image_bytes, "image/jpeg"
+
+
+def image_quality_warning(image_bytes):
+    """Warning text when the image is too small to read fine Thai text reliably, else None."""
+    try:
+        from PIL import Image
+
+        width, height = Image.open(io.BytesIO(image_bytes)).size
+    except Exception:
+        return None
+    if max(width, height) < 800 or min(width, height) < 400:
+        return (
+            f"ภาพมีความละเอียดต่ำ ({width}x{height}px) ตัวอักษรเล็ก เลขอ้างอิงและชื่ออาจอ่านผิด "
+            "ควรใช้ภาพต้นฉบับหรือสกรีนช็อตที่ชัดกว่านี้"
+        )
+    return None
 
 
 def _extract_document_intelligence_once(optimized_mime, image_data, url, headers, output_schema, payload, timeout=40):
@@ -316,8 +341,17 @@ def normalize_document_date(data):
         warnings.append(f"อ่านวันที่ได้ไม่ครบหรือรูปแบบไม่รู้จัก ('{raw}') กรุณาตรวจกับภาพ")
 
 
+def _drop_icon_noise(line):
+    """OCR often prefixes a line with a stray 1-2 glyph for an icon, far from the real text ('อ      กรุงไทย')."""
+    parts = [part for part in re.split(r"\s{3,}", line) if part]
+    long_parts = [part for part in parts if len(part.replace(" ", "")) > 2]
+    if len(parts) > 1 and len(long_parts) == 1:
+        return long_parts[0]
+    return line
+
+
 def _ocr_lines(text):
-    lines = [_clean_ocr_line(line) for line in str(text or "").splitlines()]
+    lines = [_drop_icon_noise(_clean_ocr_line(line)) for line in str(text or "").splitlines()]
     return [line for line in lines if line]
 
 
@@ -416,8 +450,11 @@ _typhoon_lock = threading.Lock()
 _typhoon_calls = deque()
 
 
-def _typhoon_wait_for_slot():
+def _typhoon_wait_for_slot(cancel=None):
+    """Wait for a free Typhoon slot. Returns False (without using a slot) if `cancel` is set meanwhile."""
     while True:
+        if cancel is not None and cancel.is_set():
+            return False
         with _typhoon_lock:
             now = time.monotonic()
             while _typhoon_calls and now - _typhoon_calls[0] >= 60:
@@ -429,11 +466,11 @@ def _typhoon_wait_for_slot():
                 wait = TYPHOON_MIN_INTERVAL - (now - _typhoon_calls[-1])
             if wait <= 0:
                 _typhoon_calls.append(now)
-                return
-        time.sleep(wait)
+                return True
+        time.sleep(min(wait, 0.25) if cancel is not None else wait)
 
 
-def _typhoon_ocr_request(image_bytes):
+def _typhoon_ocr_request(image_bytes, prepared=None, cancel=None):
     """Read the whole image with Typhoon OCR (Thai-specialised). Returns (text, status).
 
     status: 'ok', 'no_key', 'rate_limited', 'http_error' or 'error'.
@@ -441,7 +478,7 @@ def _typhoon_ocr_request(image_bytes):
     """
     if not TYPHOON_OCR_APIKEY:
         return None, "no_key"
-    optimized_bytes, optimized_mime = optimize_image_for_ocr(image_bytes, max_dim=1800)
+    optimized_bytes, optimized_mime = prepared or optimize_image_for_ocr(image_bytes, max_dim=OCR_MAX_DIM)
     image_data = base64.b64encode(optimized_bytes).decode("utf-8")
     prompt = (
         "Extract all text from the image.\n\nInstructions:\n- Only return the clean Markdown.\n"
@@ -466,7 +503,8 @@ def _typhoon_ocr_request(image_bytes):
     headers = {"Authorization": f"Bearer {TYPHOON_OCR_APIKEY}", "Content-Type": "application/json"}
     status = "error"
     for attempt in range(3):
-        _typhoon_wait_for_slot()
+        if not _typhoon_wait_for_slot(cancel):
+            return None, "cancelled"
         try:
             response = _http_session.post(TYPHOON_OCR_URL, headers=headers, json=payload, timeout=60)
             if response.status_code == 429:
@@ -477,11 +515,23 @@ def _typhoon_ocr_request(image_bytes):
                     delay = 5
                 time.sleep(delay)
                 continue
+            if response.status_code >= 500 and attempt == 0:
+                status = "http_error"
+                time.sleep(1.0)  # transient server error: one quick retry before giving up on OCR
+                continue
             if response.status_code != 200:
                 return None, "http_error"
             text = response.json()["choices"][0]["message"]["content"]
             if isinstance(text, str) and text.strip():
                 return text, "ok"
+            return None, "error"
+        except requests.exceptions.Timeout:
+            return None, "error"  # already waited the full timeout; another try would be just as slow
+        except requests.exceptions.ConnectionError:
+            if attempt == 0:
+                status = "error"
+                time.sleep(1.0)
+                continue
             return None, "error"
         except Exception:
             return None, "error"
@@ -494,6 +544,7 @@ def typhoon_ocr_text(image_bytes):
 
 
 _TYPHOON_STATUS_TEXT = {
+    "cancelled": "ยกเลิกการเรียก Typhoon",
     "no_key": "ไม่มีคีย์ Typhoon",
     "rate_limited": "Typhoon ติดโควตา",
     "http_error": "Typhoon ตอบ error",
@@ -530,6 +581,285 @@ def names_from_ocr_text(text):
     return found
 
 
+_BANK_LINE_RE = re.compile(
+    r"(ธนาคาร|กรุงไทย|กรุงเทพ|กสิกร|ไทยพาณิชย์|กรุงศรี|ทหารไทย|ธนชาต|ทีทีบี|ออมสิน|ธ\.?ก\.?ส|ซีไอเอ็มบี|ยูโอบี|"
+    r"ทิสโก้|เกียรตินาคิน|อาคารสงเคราะห์|พร้อมเพย์|ทรูมันนี่|\b(?:krungthai|kbank|scb|bbl|ktb|promptpay)\b)",
+    re.IGNORECASE,
+)
+# Masked account numbers, tolerant of OCR noise: the X mask is often read as 2, %, O or *.
+_ACCOUNT_TOKEN = r"[\dXxOo*%•●#]+"
+_ACCOUNT_SEARCH_RE = re.compile(rf"(?:{_ACCOUNT_TOKEN}-){{2,}}{_ACCOUNT_TOKEN}")
+_ID_LINE_RE = re.compile(r"^\(\s*\d{8,}\s*\)$")
+_NON_NAME_RE = re.compile(
+    r"(จำนวนเงิน|ค่าธรรมเนียม|วันที่|รหัส|เลขที่|หมายเลข|บาท|สำเร็จ|รายการ|อ้างอิง|บันทึก|แชร์|"
+    r"^[A-Za-z]{0,4}\d{6,}$|^\W+$|^!?\[|\]\(|https?://|\.(?:png|jpe?g|gif|svg)\b)"
+)
+
+
+def _is_bank_line(line):
+    return len(line) <= 40 and bool(_BANK_LINE_RE.search(line))
+
+
+def _is_account_line(line):
+    compact = line.replace(" ", "")
+    return (
+        7 <= len(compact) <= 24
+        and bool(_ACCOUNT_SEARCH_RE.fullmatch(compact))
+        and sum(ch.isdigit() for ch in compact) >= 3
+    )
+
+
+def _looks_like_name_line(line):
+    if not line or len(line) > 80 or _is_bank_line(line) or _is_account_line(line):
+        return False
+    if _NON_NAME_RE.search(line):
+        return False
+    return bool(_THAI_CHAR_RE.search(line) or _LATIN_CHAR_RE.search(line))
+
+
+def _plausible_name(line):
+    """Reject OCR junk that merely looks like text: needs 3+ letters, mostly letters, no Thai digits/odd symbols."""
+    body = re.sub(r"[\s*•●.\-']", "", line or "")
+    if len(body) < 3 or re.search(r"[๐-๙“”‘’\"«»|_=~^<>{}\[\]]", line):
+        return False
+    letters = sum(1 for ch in body if ch.isalpha() or "\u0e30" <= ch <= "\u0e4e")
+    return letters / len(body) >= 0.85
+
+
+def _split_bank_and_account(lines):
+    """'กรุงไทย XXX-X-XX075-2' on one line -> two lines, so the block parser sees bank and account separately."""
+    expanded = []
+    for line in lines:
+        match = _ACCOUNT_SEARCH_RE.search(line.replace(" ", "")) if _BANK_LINE_RE.search(line) else None
+        if match and not _is_account_line(line):
+            account = re.search(rf"(?:{_ACCOUNT_TOKEN}[- ]){{2,}}{_ACCOUNT_TOKEN}", line)
+            if account:
+                expanded.extend([line[:account.start()].strip() or line, account.group(0).strip()])
+                continue
+        expanded.append(line)
+    return expanded
+
+
+def _payer_block(lines):
+    """(index, name, account_line) of the first 'name + bank + masked account' block, or None."""
+    for index in range(len(lines) - 2):
+        name, bank, account = lines[index:index + 3]
+        if _looks_like_name_line(name) and _plausible_name(name) and _is_bank_line(bank) and _is_account_line(account):
+            return index, name, account
+    return None
+
+
+def names_from_ocr_layout(text):
+    """Pick payer/receiver names on slips that have NO 'จาก'/'ไปยัง' labels (e.g. bill-payment slips).
+
+    Evidence required (never position alone): the payer is the name that is immediately followed by a
+    bank line AND a (masked) account number, which is how a slip shows the sender's own account. The receiver
+    is the next plausible name after that block, preferring one that is itself followed by a bank+account block
+    or by a '(merchant id)' line; a trailing '(id)' is dropped. Names are copied verbatim from OCR and junk
+    that only looks like text is rejected. Returns {} unless the structure is found, so unknown layouts fall
+    back to the vision model instead of being guessed.
+    """
+    lines = _split_bank_and_account(_ocr_lines(text))
+    block = _payer_block(lines)
+    if not block:
+        return {}
+    index, name, _ = block
+    found = {"payer_name": name}
+    window = lines[index + 3:index + 9]
+    weak = None
+    for offset, candidate in enumerate(window):
+        candidate = re.sub(r"\s*\(\s*[\dXx*\- ]+\)\s*$", "", candidate).strip()
+        if not (_looks_like_name_line(candidate) and _plausible_name(candidate)):
+            continue
+        following = window[offset + 1:offset + 3]
+        strong = bool(following) and (
+            _ID_LINE_RE.match(following[0].replace(" ", ""))
+            or (len(following) == 2 and _is_bank_line(following[0]) and _is_account_line(following[1]))
+        )
+        if strong:
+            found["store_name"] = candidate
+            return found
+        weak = weak or candidate
+    if weak:
+        found["store_name"] = weak
+    return found
+
+
+def account_signature(account):
+    """Stable fingerprint of a masked account number: the digits of its last two groups
+    ('XXX-X-XX075-2' and the OCR-noisy '2%%%-%-%%075-2' both give '0752'). None if there are no digits."""
+    groups = [g for g in re.split(r"[-\s]+", str(account or "")) if g]
+    digits = "".join(ch for group in groups[-2:] for ch in group if ch.isdigit())
+    return digits if len(digits) >= 3 else None
+
+
+def account_from_ocr_layout(text):
+    """The payer's masked account line from the same block names_from_ocr_layout uses (verbatim), or None."""
+    block = _payer_block(_split_bank_and_account(_ocr_lines(text)))
+    return block[2] if block else None
+
+
+def _name_core(text):
+    return re.sub(r"[\s*•●○·＊.\-_()]+", "", str(text or "")).lower()
+
+
+def name_similarity(first, second):
+    """0..1 similarity of two names, ignoring spaces, case and '*' masking."""
+    a, b = _name_core(first), _name_core(second)
+    if not a or not b:
+        return 0.0
+    return 1.0 if a == b else difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
+
+
+def grade_name_against_ocr(name, ocr_text):
+    """Compare a name with the OCR text. Returns one of:
+    'exact'   the name (ignoring spaces/case/'*') appears in the OCR text,
+    'near'    a line of the OCR text is very similar (likely a small reading difference),
+    'absent'  nothing similar in the OCR text,
+    'unknown' no name, or the OCR text is too short to judge.
+    Both readings can be wrong, so this only grades; it never decides which one is right."""
+    core = _name_core(name)
+    lines = [c for c in (_name_core(line) for line in _ocr_lines(ocr_text)) if c]
+    whole = "".join(lines)
+    if not core or len(whole) < 8:
+        return "unknown"
+    if core in whole:
+        return "exact"
+    best = 0.0
+    for line in lines:
+        if len(line) < max(3, len(core) // 2):
+            continue
+        for size in range(max(2, len(core) - 1), len(core) + 2):
+            for start in range(0, max(1, len(line) - size + 1)):
+                window = line[start:start + size]
+                best = max(best, difflib.SequenceMatcher(None, core, window, autojunk=False).ratio())
+        if best >= NAME_NEAR_THRESHOLD:
+            return "near"
+    return "near" if best >= NAME_NEAR_THRESHOLD else "absent"
+
+
+def grade_names_against_ocr(data, text, keys=None):
+    """{'payer_name': grade, 'store_name': grade} for a transfer slip ({} for other documents)."""
+    if not isinstance(data, dict) or data.get("transfer_amount") is None:
+        return {}
+    return {
+        key: grade_name_against_ocr(data.get(key), text)
+        for key in NAME_FIELD_LABELS
+        if keys is None or key in keys
+    }
+
+
+def ground_names_in_ocr(data, text, keys=None):
+    """Grade transfer-slip names against the Typhoon OCR text, store the grades in data['name_check'] and
+    return warnings for names that are only 'near' or 'absent' (a typical sign of a Thai name that the
+    vision model transliterated into Latin letters). Never rewrites a name."""
+    if not text:
+        return []
+    grades = grade_names_against_ocr(data, text, keys)
+    if not grades:
+        return []
+    data.setdefault("name_check", {}).update(grades)
+    ocr_has_thai = bool(_THAI_CHAR_RE.search(str(text)))
+    warnings = []
+    for key, grade in grades.items():
+        label, name = NAME_FIELD_LABELS[key], data.get(key)
+        if grade == "absent":
+            hint = ""
+            if ocr_has_thai and name and not _THAI_CHAR_RE.search(str(name)):
+                hint = " (เป็นอักษรอังกฤษทั้งที่สลิปมีข้อความไทย อาจเป็นการถอดเสียงชื่อไทย)"
+            warnings.append(
+                f"ชื่อ{label} '{name}' ไม่พบในข้อความ OCR ต้นฉบับ อาจอ่านผิดหรือถูกแปลงเป็นอักษรอังกฤษ{hint} กรุณาตรวจกับภาพ"
+            )
+        elif grade == "near":
+            warnings.append(f"ชื่อ{label} '{name}' ใกล้เคียงแต่ไม่ตรงกับข้อความ OCR ต้นฉบับ กรุณาตรวจตัวสะกดกับภาพ")
+    return warnings
+
+
+_THAI_MARKS_RE = re.compile("[\u0e31\u0e34-\u0e3a\u0e47-\u0e4e]")  # vowel marks, tone marks, thanthakhat
+
+
+def thai_skeleton(text):
+    """Name without spaces/case/'*' and without Thai vowel and tone marks, so OCR spelling slips such as
+    'ธันย์บุรณ์' vs 'ธันยบูรณ์' compare equal."""
+    return _THAI_MARKS_RE.sub("", _name_core(text))
+
+
+KNOWN_NAME_AUTO_RATIO = 0.85
+
+
+def match_known_name(name, known_names, role, account=None):
+    """Find a user-confirmed name for a name read from a slip.
+    known_names: [{"role": "payer"|"receiver", "name": str, "account": optional masked account}].
+    Returns (entry, "account"|"spelling") or None. 'account' = same masked-account fingerprint (payer only);
+    'spelling' = the same name apart from vowel/tone marks or a very small difference."""
+    signature = account_signature(account) if role == "payer" else None
+    skeleton = thai_skeleton(name)
+    best = None
+    for entry in known_names or []:
+        if entry.get("role") != role or not entry.get("name"):
+            continue
+        if signature and account_signature(entry.get("account")) == signature:
+            return entry, "account"
+        if skeleton:
+            ratio = difflib.SequenceMatcher(None, skeleton, thai_skeleton(entry["name"]), autojunk=False).ratio()
+            if ratio >= KNOWN_NAME_AUTO_RATIO and (best is None or ratio > best[0]):
+                best = (ratio, entry)
+    return (best[1], "spelling") if best else None
+
+
+def apply_known_names(data, known_names):
+    """Replace a transfer slip's payer/receiver name by the name the user already confirmed, when the evidence is
+    strong (same masked account, or the same name apart from vowel/tone marks). The name read from the slip is kept
+    in data['name_model_reading'] and a warning says what changed. Returns True if anything changed."""
+    if not known_names or not isinstance(data, dict) or data.get("transfer_amount") is None:
+        return False
+    changed = False
+    for key, role in (("payer_name", "payer"), ("store_name", "receiver")):
+        name = data.get(key)
+        match = match_known_name(name, known_names, role, data.get("payer_account"))
+        if not match:
+            continue
+        entry, why = match
+        data.setdefault("name_check", {})[key] = "known"
+        if _name_core(name) == _name_core(entry["name"]):
+            continue
+        if name:
+            data.setdefault("name_model_reading", {}).setdefault(key, name)
+        data[key] = entry["name"]
+        data.setdefault("check_warnings", []).append(
+            f"ปรับชื่อ{NAME_FIELD_LABELS[key]}{f' จาก {name!r}' if name else ''} เป็น '{entry['name']}' ตามชื่อที่คุณเคยยืนยัน "
+            f"({'เลขบัญชีตรงกัน' if why == 'account' else 'สะกดใกล้เคียงกัน'}) กรุณาตรวจกับภาพ"
+        )
+        source = str(data.get("name_source") or "").strip()
+        if "ชื่อที่ผู้ใช้ยืนยัน" not in source:
+            data["name_source"] = (source + " + " if source else "") + "ชื่อที่ผู้ใช้ยืนยัน"
+        changed = True
+    if changed:
+        data["ocr_text"] = summarize_document_data(data)
+    return changed
+
+
+def _note_model_vs_ocr(data, model_names, ocr_names):
+    """The names read from OCR labels/layout replace the vision model's names (OCR text is verbatim), but the
+    model's own reading is kept in data['name_model_reading'] and a disagreement or role swap is flagged."""
+    warnings = data.setdefault("check_warnings", [])
+    for key, ocr_value in ocr_names.items():
+        previous = model_names.get(key)
+        if previous and name_similarity(previous, ocr_value) < NAME_NEAR_THRESHOLD:
+            data.setdefault("name_model_reading", {})[key] = previous
+            warnings.append(
+                f"ชื่อ{NAME_FIELD_LABELS[key]}ที่โมเดลภาพอ่านได้ ('{previous}') ต่างจากข้อความ OCR ('{ocr_value}') "
+                "ระบบใช้ค่าจาก OCR กรุณาตรวจกับภาพ"
+            )
+    payer, store = model_names.get("payer_name"), model_names.get("store_name")
+    if (
+        payer and store and ocr_names.get("payer_name") and ocr_names.get("store_name")
+        and name_similarity(payer, ocr_names["store_name"]) >= NAME_NEAR_THRESHOLD
+        and name_similarity(store, ocr_names["payer_name"]) >= NAME_NEAR_THRESHOLD
+    ):
+        warnings.append("โมเดลภาพอ่านชื่อผู้จ่ายกับผู้รับสลับกับที่ OCR ระบุ ระบบใช้ตามป้าย/โครงสร้างใน OCR กรุณาตรวจกับภาพ")
+
+
 def _refine_person_names(optimized_mime, image_data, url, headers):
     """Second, narrow pass that reads only the sender/receiver names on a transfer slip.
 
@@ -541,6 +871,9 @@ def _refine_person_names(optimized_mime, image_data, url, headers):
         '/no_think อ่านเฉพาะชื่อบุคคลบนสลิปโอนเงินนี้ ตอบ JSON เท่านั้น: '
         '{"payer_name": null, "receiver_name": null}. '
         "payer_name คือชื่อใต้คำว่า 'จาก'; receiver_name คือชื่อใต้คำว่า 'ไปยัง'. "
+        "ถ้าสลิปไม่มีคำว่า จาก/ไปยัง (เช่น สลิปจ่ายบิล) ให้ดูโครงสร้าง: ชื่อที่อยู่คู่กับธนาคารและเลขบัญชีที่ถูกปิดบัง (XXX) ที่ต้นลูกศรคือ payer_name "
+        "ส่วนชื่อร้านค้า/ผู้รับที่ปลายลูกศรหรืออยู่ใกล้ 'รหัสร้านค้า' คือ receiver_name; ห้ามนำรหัสร้านค้า รหัสธุรกรรม หรือชื่อธนาคารมาเป็นชื่อ. "
+        "ห้ามถอดเสียงชื่ออักษรไทยเป็นอักษรโรมัน (เช่น ห้ามตอบ 'Thanyaboon') ถ้าในภาพเป็นอักษรไทยต้องตอบเป็นอักษรไทยเท่านั้น. "
         "ถอดอักษรไทยตามภาพทีละตัวอักษร รวมคำนำหน้า (นาย/นาง/นางสาว) สระ วรรณยุกต์ และการันต์ (เช่น ธุ์) "
         "ตัวที่ถูกปิดด้วย * ให้คง * ไว้ตามภาพ ห้ามแปลงอักษรไทยเป็นอักษรอังกฤษ ห้ามเดาหรือแก้ชื่อให้คุ้นเคย; อ่านไม่ได้ให้เป็น null."
     )
@@ -582,10 +915,13 @@ def extract_document_intelligence(image_bytes, mime_type="image/jpeg", max_attem
         return {
             "success": False,
             "error": "ยังไม่ได้ตั้งค่า THAILLM_APIKEY กรุณาเพิ่มคีย์ใน .streamlit/secrets.toml หรือ environment variables แล้วเริ่มแอปใหม่",
+            "retryable": False,
         }
 
-    # Pre-process image once; reused across retry attempts below.
-    optimized_bytes, optimized_mime = optimize_image_for_ocr(image_bytes)
+    started_at = time.perf_counter()
+    # Pre-process image once; reused across retry attempts and by Typhoon OCR.
+    optimized_bytes, optimized_mime = optimize_image_for_ocr(image_bytes, max_dim=OCR_MAX_DIM)
+    timings = {"prepare_s": round(time.perf_counter() - started_at, 3)}
     image_data = base64.b64encode(optimized_bytes).decode("utf-8")
     url = "https://api.thaillm.or.th/v1/chat/completions"
     headers = {
@@ -597,6 +933,7 @@ def extract_document_intelligence(image_bytes, mime_type="image/jpeg", max_attem
             "document_type": None,
             "store_name": None,
             "payer_name": None,
+            "payer_account": None,
             "date": None,
             "time": None,
             "receipt_no": None,
@@ -626,6 +963,10 @@ def extract_document_intelligence(image_bytes, mime_type="image/jpeg", max_attem
         "total ของสลิปเท่ากับ transfer_amount. ถ้าไม่มีรายการให้ items เป็น []. "
         "สำหรับสลิปโอนเงิน: store_name คือชื่อผู้รับเงิน (ฝั่ง 'ไปยัง'/'ผู้รับ') "
         "และ payer_name คือชื่อผู้โอน/ผู้จ่ายเงิน (ฝั่ง 'จาก'/'ผู้โอน') ห้ามใส่สลับกัน; "
+        "ถ้าสลิปไม่มีคำว่า จาก/ไปยัง (เช่น สลิปจ่ายบิล) ให้ดูโครงสร้าง: ชื่อที่คู่กับธนาคารและเลขบัญชีที่ถูกปิดบัง (XXX) ที่ต้นลูกศรคือ payer_name "
+        "ส่วนชื่อร้านค้า/ผู้รับที่ปลายลูกศรหรือใกล้ 'รหัสร้านค้า' คือ store_name; ห้ามนำรหัสร้านค้า รหัสธุรกรรม หรือชื่อธนาคารมาเป็นชื่อ; "
+        "ห้ามถอดเสียงชื่ออักษรไทยเป็นอักษรโรมัน; แยกไม่ได้ให้เป็น null; "
+        "payer_account คือเลขบัญชีผู้จ่ายที่ถูกปิดบังบางส่วนตามที่พิมพ์ในสลิป (เช่น XXX-X-XX075-2) ไม่มีให้เป็น null. "
         "สำหรับใบเสร็จร้านค้าให้ payer_name เป็น null. "
         "ชื่อบุคคล (store_name, payer_name) ให้ถอดตัวอักษรไทยทุกตัว รวมสระและวรรณยุกต์ ตามที่เห็นในภาพอย่างเคร่งครัดทีละตัวอักษร "
         "ห้ามเดาหรือแก้ตัวสะกดให้เป็นชื่อที่คุ้นเคย/พบบ่อยกว่าเด็ดขาด แม้ตัวสะกดจะดูแปลกก็ให้คงไว้ตามภาพ. "
@@ -659,18 +1000,28 @@ def extract_document_intelligence(image_bytes, mime_type="image/jpeg", max_attem
     # the same time instead of waiting for Qwen first (saves one full OCR round-trip).
     typhoon_pool = None
     typhoon_future = None
+    typhoon_cancel = threading.Event()
     if TYPHOON_OCR_APIKEY:
         typhoon_pool = ThreadPoolExecutor(max_workers=1)
-        typhoon_future = typhoon_pool.submit(_typhoon_ocr_request, image_bytes)
-
-    try:
-        return _extract_with_retries(
-            image_bytes, optimized_mime, image_data, url, headers, output_schema,
-            payload, max_attempts, typhoon_future, rescue,
+        typhoon_future = typhoon_pool.submit(
+            _typhoon_ocr_request, image_bytes, (optimized_bytes, optimized_mime), typhoon_cancel
         )
+
+    result = None
+    try:
+        result = _extract_with_retries(
+            image_bytes, optimized_mime, image_data, url, headers, output_schema,
+            payload, max_attempts, typhoon_future, rescue, timings, typhoon_cancel,
+        )
+        return result
     finally:
+        typhoon_cancel.set()  # no-op if Typhoon already finished; frees its quota slot if it was still waiting
         if typhoon_pool is not None:
             typhoon_pool.shutdown(wait=False)
+        timings["total_s"] = round(time.perf_counter() - started_at, 3)
+        if isinstance(result, dict):
+            result["timings"] = timings
+        _timing_log.info("document timings %s", json.dumps(timings, ensure_ascii=False))
 
 
 def _lean_payload(payload, output_schema, level):
@@ -694,77 +1045,284 @@ def _lean_payload(payload, output_schema, level):
     return variant
 
 
+def _resolve_transfer_names(data, typhoon_text, typhoon_status, optimized_mime, image_data, url, headers, timings):
+    """Decide payer/receiver names of a transfer slip from the best evidence, in this order:
+    1. OCR labels (จาก/ไปยัง)  2. OCR layout (name + bank + masked account)  3. the vision model's own reading,
+    which is re-read by a second, narrower vision call only if it cannot be matched against the OCR text."""
+    warnings = data.setdefault("check_warnings", [])
+    model_names = {key: data.get(key) for key in NAME_FIELD_LABELS}
+    ocr_names = names_from_ocr_text(typhoon_text)
+    basis = "typhoon-ocr"
+    if not ocr_names:
+        ocr_names = names_from_ocr_layout(typhoon_text)
+        if ocr_names:
+            basis = "typhoon-ocr (อนุมานจากโครงสร้างสลิป)"
+            warnings.append(
+                "สลิปนี้ไม่มีป้าย จาก/ไปยัง ระบบจึงจับคู่ชื่อผู้จ่าย/ผู้รับจากโครงสร้าง (ชื่อ+ธนาคาร+เลขบัญชี) "
+                "กรุณาตรวจกับภาพ"
+            )
+    ocr_account = account_from_ocr_layout(typhoon_text)
+    if ocr_account:
+        data["payer_account"] = ocr_account
+    if ocr_names:
+        _note_model_vs_ocr(data, model_names, ocr_names)
+        data.update(ocr_names)
+        data["name_source"] = basis
+        data.setdefault("name_check", {}).update({key: "exact" for key in ocr_names})
+        if typhoon_text:
+            warnings.extend(ground_names_in_ocr(data, typhoon_text, keys=set(NAME_FIELD_LABELS) - set(ocr_names)))
+        return
+
+    if typhoon_text:
+        grades = grade_names_against_ocr(data, typhoon_text)
+        if all(data.get(key) for key in NAME_FIELD_LABELS) and all(g in ("exact", "near") for g in grades.values()):
+            # Both names are confirmed by the OCR text, so the second vision call would add nothing.
+            data["name_source"] = "qwen (ตรงกับ OCR)"
+            warnings.extend(ground_names_in_ocr(data, typhoon_text))
+            timings["refine_used"] = False
+            return
+
+    reason = _TYPHOON_STATUS_TEXT.get(typhoon_status, "Typhoon ไม่พบป้าย จาก/ไปยัง")
+    data["name_source"] = f"qwen ({reason})"
+    refine_started = time.perf_counter()
+    refined = _refine_person_names(optimized_mime, image_data, url, headers)
+    timings["refine_s"] = round(time.perf_counter() - refine_started, 3)
+    timings["refine_used"] = True
+    for key, value in refined.items():
+        # Don't replace a clean first-pass name with a Thai/Latin mix.
+        if name_looks_unreliable(value) and data.get(key) and not name_looks_unreliable(data.get(key)):
+            continue
+        if model_names.get(key) and name_similarity(model_names[key], value) < NAME_NEAR_THRESHOLD:
+            data.setdefault("name_model_reading", {})[key] = model_names[key]
+        data[key] = value
+    if typhoon_text:
+        warnings.extend(ground_names_in_ocr(data, typhoon_text))
+
+
+def _extract_structured_from_ocr_text(raw_ocr, url, headers, timeout=25):
+    """Recover structured fields from independent OCR text if the vision JSON was malformed."""
+    schema = {
+        "document_type": None,
+        "store_name": None,
+        "payer_name": None,
+        "payer_account": None,
+        "date": None,
+        "time": None,
+        "receipt_no": None,
+        "items": [],
+        "subtotal": None,
+        "discount": None,
+        "shipping": None,
+        "service_charge": None,
+        "vat": None,
+        "total": None,
+        "transfer_amount": None,
+        "fee": None,
+        "debited_total": None,
+        "notes": None,
+    }
+    prompt = (
+        "แปลง OCR ต่อไปนี้เป็น JSON ตาม schema โดยใช้เฉพาะตัวเลข/ข้อความที่ปรากฏ ห้ามเดาหรือคำนวณแทนค่าที่หายไป "
+        "สลิปโอนให้แยก transfer_amount, fee, debited_total; total ของสลิปคือ transfer_amount "
+        "subtotal คือยอดรายการก่อนส่วนลดและภาษี ถ้าไม่มีรายการใช้ [] และค่าที่ไม่มีใช้ null "
+        f"\nSchema: {json.dumps({'data': schema}, ensure_ascii=False)}\nOCR:\n{raw_ocr}"
+    )
+    payload = {
+        "model": PRIMARY_MODEL_ID,
+        "messages": [
+            {"role": "system", "content": "แปลง OCR เป็น JSON เท่านั้น ห้ามอธิบายหรือแต่งตัวเลข"},
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": 1200,
+        "temperature": 0,
+    }
+    started = time.perf_counter()
+    try:
+        response = _http_session.post(url, headers=headers, json=payload, timeout=timeout)
+        elapsed = round(time.perf_counter() - started, 2)
+        if response.status_code != 200:
+            return {"success": False, "error": f"Text extraction API HTTP {response.status_code}", "elapsed_time": elapsed}
+        answer = clean_llm_response(response.json()["choices"][0]["message"]["content"])
+        parsed = parse_json_object(answer)
+        if not isinstance(parsed, dict):
+            return {"success": False, "error": "Text extraction คืน JSON ไม่ได้", "elapsed_time": elapsed}
+        data = parsed.get("data") if isinstance(parsed.get("data"), dict) else parsed
+        if not isinstance(data, dict):
+            return {"success": False, "error": "Text extraction ไม่มี data fields", "elapsed_time": elapsed}
+        data.setdefault("items", [])
+        data["items"] = data.get("items") or []
+        data["ocr_text"] = summarize_document_data(data)
+        return {
+            "success": True,
+            "data": data,
+            "raw_content": raw_ocr,
+            "elapsed_time": elapsed,
+            "fallback_used": "Typhoon OCR text",
+        }
+    except Exception as error:
+        return {"success": False, "error": str(error), "elapsed_time": round(time.perf_counter() - started, 2)}
+
+
 def _extract_with_retries(image_bytes, optimized_mime, image_data, url, headers,
-                          output_schema, payload, max_attempts, typhoon_future, rescue=False):
+                          output_schema, payload, max_attempts, typhoon_future, rescue=False,
+                          timings=None, typhoon_cancel=None):
+    timings = timings if timings is not None else {}
     last_result = None
     for attempt in range(max_attempts):
         level = attempt + (1 if rescue else 0)
-        if level > 0:
-            # Back off before retrying so a busy/rate-limited API has time to recover.
-            wait = min(2.0 * level, 6.0)
+        if attempt > 0:
+            # The first manual retry is immediate; only subsequent attempts back off.
+            wait = min(1.5 * attempt, 4.0)
             if last_result and "429" in str(last_result.get("error", "")):
-                wait = 10.0
+                wait = 4.0
             time.sleep(wait)
         if level == 0:
             use_payload, use_timeout = payload, 40
         else:
-            use_payload, use_timeout = _lean_payload(payload, output_schema, level), 75
+            use_payload, use_timeout = _lean_payload(payload, output_schema, level), 50
         result = _extract_document_intelligence_once(
             optimized_mime, image_data, url, headers, output_schema, use_payload, timeout=use_timeout
         )
+        timings["vision_calls"] = attempt + 1
+        timings["vision_s"] = round(timings.get("vision_s", 0.0) + float(result.get("elapsed_time") or 0.0), 3)
         if result.get("success"):
             result.pop("retryable", None)
             data = result["data"]
             normalize_document_date(data)
+            quality_warning = image_quality_warning(image_bytes)
+            if quality_warning:
+                data.setdefault("check_warnings", []).append(quality_warning)
             if data.get("transfer_amount") is not None:
+                waited = time.perf_counter()
                 if typhoon_future is not None:
                     typhoon_text, typhoon_status = typhoon_future.result()
                 else:
                     typhoon_text, typhoon_status = _typhoon_ocr_request(image_bytes)
+                timings["typhoon_wait_s"] = round(time.perf_counter() - waited, 3)
+                timings["typhoon_status"] = typhoon_status
                 if typhoon_text:
                     apply_ocr_crosscheck(data, typhoon_text)
                     if not result.get("raw_content"):
                         result["raw_content"] = typhoon_text
-                typhoon_names = names_from_ocr_text(typhoon_text)
-                if typhoon_names:
-                    data.update(typhoon_names)
-                    data["name_source"] = "typhoon-ocr"
-                else:
-                    reason = _TYPHOON_STATUS_TEXT.get(typhoon_status, "Typhoon ไม่พบป้าย จาก/ไปยัง")
-                    data["name_source"] = f"qwen ({reason})"
-                    for key, value in _refine_person_names(optimized_mime, image_data, url, headers).items():
-                        # Don't replace a clean first-pass name with a Thai/Latin mix.
-                        if name_looks_unreliable(value) and data.get(key) and not name_looks_unreliable(data.get(key)):
-                            continue
-                        data[key] = value
+                _resolve_transfer_names(
+                    data, typhoon_text, typhoon_status, optimized_mime, image_data, url, headers, timings
+                )
                 data["ocr_text"] = summarize_document_data(data)
+            elif typhoon_cancel is not None:
+                typhoon_cancel.set()  # not a slip: don't spend Typhoon quota on it
             if attempt > 0:
                 result["attempts"] = attempt + 1
             return result
         last_result = result
-        if not result.pop("retryable", False):
+        retryable = bool(result.get("retryable", False))
+        if not retryable:
             break
+    # If vision repeatedly returns malformed JSON, use the independent OCR transcription
+    # that was running in parallel instead of discarding a readable document.
+    if (
+        isinstance(last_result, dict)
+        and not last_result.get("success")
+        and last_result.get("retryable")
+        and typhoon_future is not None
+        and TYPHOON_OCR_APIKEY
+    ):
+        try:
+            typhoon_text, typhoon_status = typhoon_future.result(timeout=25)
+        except Exception:
+            typhoon_text, typhoon_status = None, "error"
+        if typhoon_text:
+            fallback_started = time.perf_counter()
+            recovered = _extract_structured_from_ocr_text(typhoon_text, url, headers)
+            timings["text_fallback_s"] = round(time.perf_counter() - fallback_started, 3)
+            if recovered.get("success"):
+                data = recovered["data"]
+                normalize_document_date(data)
+                apply_ocr_crosscheck(data, typhoon_text)
+                names = names_from_ocr_text(typhoon_text) or names_from_ocr_layout(typhoon_text)
+                if names:
+                    data.update(names)
+                    data["name_source"] = "typhoon-ocr"
+                    if "payer_name" in names:
+                        account = account_from_ocr_layout(typhoon_text)
+                        if account:
+                            data["payer_account"] = account
+                data["ocr_text"] = summarize_document_data(data)
+                recovered["data"] = data
+                recovered["elapsed_time"] = round(
+                    float(recovered.get("elapsed_time") or 0) + float(last_result.get("elapsed_time") or 0), 2
+                )
+                recovered["attempts"] = timings.get("vision_calls", 0)
+                recovered["timings"] = timings
+                return recovered
+            last_result["fallback_error"] = recovered.get("error")
+        else:
+            last_result["ocr_fallback_status"] = typhoon_status
+
+    if isinstance(last_result, dict) and not last_result.get("success"):
+        last_result["attempts"] = timings.get("vision_calls", 0)
+        last_result["retryable"] = bool(last_result.get("retryable", False))
     return last_result
 
 
-def extract_documents_batch(documents, max_workers=6, progress_callback=None, rescue=False):
+def document_hash(image_bytes):
+    """Content hash used to recognise a file that was already read (same bytes -> same result)."""
+    return hashlib.sha256(image_bytes).hexdigest()
+
+
+def extract_documents_batch(documents, max_workers=6, progress_callback=None, rescue=False,
+                            detail_callback=None, result_callback=None):
     """Process (file_name, bytes, mime) tuples in parallel; results keep input order.
 
-    progress_callback(done, total) is called from the calling thread as each file finishes.
+    * progress_callback(done, total) / detail_callback(done, running, failed, total) are called from the
+      calling thread as each file finishes (running = files currently being read, queued ones excluded).
+    * result_callback(index, result) is called as soon as one file is finished, so the caller can keep it even if
+      the run is interrupted (e.g. a Streamlit rerun) before the whole batch completes.
+    * Identical files in one batch are read once and the result is copied (no duplicate API calls).
+    * If the calling thread is interrupted, files that have not started yet are cancelled.
     """
     if not documents:
         return []
 
-    worker_count = min(max(1, max_workers), len(documents))
-    results = [None] * len(documents)
-    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+    total = len(documents)
+    first_index_for_hash = {}
+    duplicates = {}  # first index -> [duplicate indexes]
+    unique_indexes = []
+    for index, (_, image_bytes, _) in enumerate(documents):
+        key = document_hash(image_bytes)
+        if key in first_index_for_hash:
+            duplicates.setdefault(first_index_for_hash[key], []).append(index)
+        else:
+            first_index_for_hash[key] = index
+            unique_indexes.append(index)
+
+    worker_count = min(max(1, max_workers), len(unique_indexes))
+    results = [None] * total
+    done = failed = 0
+
+    def _report():
+        running = min(worker_count, len(unique_indexes) - sum(1 for i in unique_indexes if results[i] is not None))
+        for callback, args in ((progress_callback, (done, total)), (detail_callback, (done, running, failed, total))):
+            if callback:
+                try:
+                    callback(*args)
+                except Exception:
+                    pass
+
+    _report_initial = detail_callback
+    if _report_initial:
+        try:
+            _report_initial(0, worker_count, 0, total)
+        except Exception:
+            pass
+
+    executor = ThreadPoolExecutor(max_workers=worker_count)
+    try:
         future_to_index = {
             executor.submit(
-                extract_document_intelligence, image_bytes, mime_type, 4 if rescue else 3, rescue
+                extract_document_intelligence, documents[index][1], documents[index][2], 2 if rescue else 3, rescue
             ): index
-            for index, (_, image_bytes, mime_type) in enumerate(documents)
+            for index in unique_indexes
         }
-        done = 0
         for future in as_completed(future_to_index):
             index = future_to_index[future]
             try:
@@ -773,12 +1331,25 @@ def extract_documents_batch(documents, max_workers=6, progress_callback=None, re
                 result = {"success": False, "error": str(error)}
             result["file_name"] = documents[index][0]
             results[index] = result
-            done += 1
-            if progress_callback:
-                try:
-                    progress_callback(done, len(documents))
-                except Exception:
-                    pass
+            members = [index]
+            for duplicate_index in duplicates.get(index, []):
+                copied = copy.deepcopy(result)
+                copied["file_name"] = documents[duplicate_index][0]
+                copied["timings"] = {"reused_duplicate": True, "total_s": 0.0}
+                results[duplicate_index] = copied
+                members.append(duplicate_index)
+            for member in members:
+                done += 1
+                if not results[member].get("success"):
+                    failed += 1
+                if result_callback:
+                    try:
+                        result_callback(member, results[member])
+                    except Exception:
+                        pass
+                _report()
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
     return results
 
 
@@ -1453,6 +2024,109 @@ def number_from_item(value):
         return float(str(value).replace(",", "").replace("บาท", "").strip())
     except (TypeError, ValueError):
         return None
+
+
+CHECK_STATUS_LABELS = {
+    "checked": "ตรวจสอบแล้ว",
+    "review": "พบข้อมูลที่ควรตรวจทาน",
+    "incomplete": "ข้อมูลไม่ครบ",
+    "not_processed": "ยังไม่ได้ประมวลผล",
+    "error": "เกิดข้อผิดพลาด",
+}
+_BLANK_VALUES = {"", "ไม่ระบุ", "none", "null", "nan", "-"}
+
+
+def result_fingerprint(result):
+    """Stable hash of what a check depends on, so a stale check is noticed after the user edits a document."""
+    import hashlib
+
+    if not isinstance(result, dict):
+        return ""
+    basis = {
+        "success": result.get("success"),
+        "error": result.get("error"),
+        "data": result.get("data"),
+    }
+    return hashlib.sha1(json.dumps(basis, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()
+
+
+def check_document_result(result):
+    """Automatic check of ONE processed document. Reuses the existing checks and makes NO API call:
+    OCR cross-check warnings stored in data['check_warnings'], unreliable-name detection and
+    audit_financials (arithmetic reconciliation), plus a completeness check (amount, date, receiver).
+
+    This is NOT a bank/third-party confirmation of the transaction, and it does not set the
+    user's own 'verified' flag. Returns {"status", "label", "issues", "notes", "level", "fingerprint"}.
+    """
+    fingerprint = result_fingerprint(result)
+
+    def build(status, issues=(), notes=(), level="-"):
+        return {
+            "status": status,
+            "label": CHECK_STATUS_LABELS[status],
+            "issues": list(issues),
+            "notes": list(notes),
+            "level": level,
+            "fingerprint": fingerprint,
+        }
+
+    if not isinstance(result, dict) or "success" not in result:
+        return build("not_processed", ["ยังไม่มีผลการประมวลผลของเอกสารนี้"])
+    if not result.get("success"):
+        return build("error", [str(result.get("error") or "ประมวลผลไม่สำเร็จ")])
+    data = result.get("data")
+    if not isinstance(data, dict):
+        return build("error", ["ไม่มีข้อมูลที่อ่านได้จากเอกสาร"])
+
+    missing = []
+    amount = data.get("transfer_amount") if data.get("transfer_amount") is not None else data.get("total")
+    if number_from_item(amount) is None:
+        missing.append("ไม่พบยอดเงิน")
+    if not parse_date(data.get("date")):
+        missing.append("วันที่ไม่ครบหรืออ่านไม่ได้")
+    if str(data.get("store_name") or "").strip().lower() in _BLANK_VALUES:
+        missing.append("ไม่พบชื่อร้านค้า/ผู้รับ")
+
+    issues = [str(w) for w in (data.get("check_warnings") or [])]
+    for label in unreliable_name_fields(data):
+        issues.append(f"ชื่อ{label}มีอักษรอังกฤษปนกับไทย อาจอ่านผิด")
+    audit = audit_financials(data)
+    if audit.get("status") == "warning":
+        issues.append(str(audit.get("msg")))
+    level = "เทียบสมการยอดเงินแล้ว" if audit.get("status") == "passed" else "ตรวจความครบถ้วนของข้อมูล (ไม่มีสมการให้เทียบครบ)"
+    notes = []
+
+    if missing:
+        return build("incomplete", missing + issues, notes, level)
+    if issues:
+        return build("review", issues, notes, level)
+    return build("checked", [], notes, level)
+
+
+def check_batch_results(results, progress_callback=None):
+    """Run check_document_result for every document. One failing document never affects the others,
+    and a check already stored on a result is reused when its data has not changed (no recomputation)."""
+    checks = []
+    total = len(results)
+    for index, result in enumerate(results):
+        try:
+            previous = result.get("batch_check") if isinstance(result, dict) else None
+            if isinstance(previous, dict) and previous.get("fingerprint") == result_fingerprint(result):
+                check = previous
+            else:
+                check = check_document_result(result)
+        except Exception as error:  # keep the rest of the batch intact
+            check = {
+                "status": "error", "label": CHECK_STATUS_LABELS["error"],
+                "issues": [f"ตรวจสอบรายการนี้ไม่สำเร็จ: {error}"], "notes": [], "level": "-", "fingerprint": "",
+            }
+        checks.append(check)
+        if progress_callback:
+            try:
+                progress_callback(index + 1, total)
+            except Exception:
+                pass
+    return checks
 
 
 def call_ssense(text):
