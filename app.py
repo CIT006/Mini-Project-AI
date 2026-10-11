@@ -1015,6 +1015,13 @@ def render_batch_check_panel(prefix, compact=False):
         st.info("ยังไม่มีผลลัพธ์ให้ตรวจสอบ · อัปโหลดและประมวลผลเอกสารก่อน")
         return
     fresh = [_fresh_check(r) for r in results]
+    # A processing failure is already known without running the batch check (no API call needed to see it),
+    # so it is counted and listed straight away instead of waiting for the user to press the check button.
+    effective = [
+        check if check is not None
+        else (api_service.check_document_result(r) if isinstance(r, dict) and r.get("success") is False else None)
+        for r, check in zip(results, fresh)
+    ]
     pending = _pending_upload_names()
     never_checked = all(c is None for c in fresh)
 
@@ -1039,7 +1046,7 @@ def render_batch_check_panel(prefix, compact=False):
 
     counts = {key: 0 for key in api_service.CHECK_STATUS_LABELS}
     unchecked = 0
-    for check in fresh:
+    for check in effective:
         if check is None:
             unchecked += 1
         else:
@@ -1058,7 +1065,7 @@ def render_batch_check_panel(prefix, compact=False):
             column.metric(label, value)
     if pending:
         st.warning(f"มี {len(pending)} ไฟล์ที่เลือกไว้แต่ยังไม่ได้ประมวลผล: {', '.join(pending[:5])}{' …' if len(pending) > 5 else ''}")
-    if never_checked:
+    if all(c is None for c in effective):
         st.info("ยังไม่ได้ตรวจสอบ · กดปุ่มด้านบนเพื่อตรวจทุกรายการพร้อมกัน")
         return
     if unchecked:
@@ -1068,7 +1075,7 @@ def render_batch_check_panel(prefix, compact=False):
 
     if not compact:
         rows = []
-        for index, (result, check) in enumerate(zip(results, fresh)):
+        for index, (result, check) in enumerate(zip(results, effective)):
             rows.append({
                 "ลำดับ": index + 1,
                 "ชื่อไฟล์": result.get("file_name", f"ภาพที่ {index + 1}"),
@@ -1079,7 +1086,7 @@ def render_batch_check_panel(prefix, compact=False):
             })
         st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
-    problems = [(i, r, c) for i, (r, c) in enumerate(zip(results, fresh)) if c and c["status"] in ("review", "incomplete", "error")]
+    problems = [(i, r, c) for i, (r, c) in enumerate(zip(results, effective)) if c and c["status"] in ("review", "incomplete", "error")]
     if problems:
         st.markdown("**รายการที่ควรดูรายละเอียด**")
     for index, result, check in problems:
@@ -1092,7 +1099,7 @@ def render_batch_check_panel(prefix, compact=False):
                     on_click=_open_document, args=(index,),
                 )
             else:
-                st.caption("ใช้ปุ่ม “ประมวลผลซ้ำเฉพาะภาพที่ล้มเหลว” ในหน้าเอกสาร รายการที่สำเร็จแล้วจะไม่ถูกประมวลผลซ้ำ")
+                st.caption("ใช้ปุ่ม “ลองใหม่เฉพาะภาพที่ลองซ้ำได้” ในหน้าเอกสาร รายการที่สำเร็จแล้วจะไม่ถูกประมวลผลซ้ำ")
                 st.button("ไปหน้าเอกสาร", key=f"{prefix}_goto_docs_{index}", on_click=_go_page, args=("docs",))
 
     eligible = [i for i, (r, c) in enumerate(zip(results, fresh)) if c and c["status"] == "checked" and not r.get("verified")]
